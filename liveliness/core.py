@@ -1732,8 +1732,6 @@ def render_page_text(url):
 # profile page forever if the pass never came.
 
 ADJUDICATE          = os.environ.get("ADJUDICATE", "1") != "0"
-ADJUDICATION_DIR    = os.environ.get("ADJUDICATION_DIR", "adjudication")
-ADJUDICATION_QUEUE  = os.path.join(ADJUDICATION_DIR, "queue.jsonl")
 ADJUDICATE_PAGE_CAP = 6000
 
 
@@ -1741,37 +1739,14 @@ def adjudication_candidate(name, url, text):
     """
     The page as a queue row, or None when there is nothing worth asking about.
 
-    Only the page and its address: what the run made of the record is added at
-    the end of compute_liveliness(), where the arithmetic is still in scope.
+    Only the page and its address. What the scoring made of it is added at the
+    end of score_project(), where the arithmetic is still in scope.
     """
     if not (ADJUDICATE and text and text.strip()):
         return None
     return {"name": name, "url": url, "text": text[:ADJUDICATE_PAGE_CAP]}
 
 
-def queue_adjudication(record_id, entry):
-    """
-    Append one page to the queue the local pass reads.
-
-    Appending, never rewriting: a run that is killed halfway keeps the rows it
-    had already written, and two runs can queue into the same file. Duplicate
-    record ids are expected, because the same listing comes round again on the
-    next sweep, and adjudicate.mjs rules the newest row for an id and drops the
-    rest: the older row's page text is months stale.
-
-    A queue that cannot be written is not a reason to fail a scoring run: the
-    scores are already correct without it.
-    """
-    try:
-        os.makedirs(ADJUDICATION_DIR, exist_ok=True)
-        row = dict(entry, id=record_id,
-                   queued=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
-        with open(ADJUDICATION_QUEUE, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
-        return True
-    except OSError as e:
-        _log(f"    queue    → could not write {ADJUDICATION_QUEUE} ({e.strerror})")
-        return False
 
 
 # ── Pages that say the thing is over ──────────────────────────────────────────
