@@ -1,0 +1,34 @@
+[project]
+name = "liveliness"
+version = "0.1.0"
+description = "Work out whether a project is still alive from what it publishes"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [{ name = "Civic Tech Field Guide" }]
+keywords = ["civic tech", "link rot", "project health", "web archiving"]
+
+# feedparser is not optional. Without it every feed check returns nothing, so a
+# project that posts weekly scores as though it has no blog, which is a fact
+# about the install reported as a fact about the project.
+dependencies = [
+    "requests>=2.31",
+    "feedparser>=6.0",
+]
+
+[project.optional-dependencies]
+# About one reachable site in ten builds its text in the browser. Without this
+# those pages are recorded as unread rather than as empty, so nothing is scored
+# wrongly, there is just less to go on.
+browser = ["playwright>=1.40"]
+
+[project.urls]
+Homepage = "https://civictech.guide"
+Source = "https://github.com/Civic-Tech-Field-Guide/liveliness"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["liveliness"]
