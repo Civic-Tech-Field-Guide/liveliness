@@ -11,13 +11,24 @@ nothing to go on), `activity_status`, `last_activity_date`, `status`, and
 is being scored.
 """
 
-from .core import ONGOING_TYPES, is_finished_work, score_project, set_logger
+from .core import (
+    ONGOING_TYPES,
+    GitHubRateLimited,
+    close_browser,
+    is_finished_work,
+    score_project,
+    score_to_status,
+    set_logger,
+)
 from .project import Project
 
 __all__ = [
     "Project",
     "score_project",
+    "score_to_status",
     "set_logger",
+    "close_browser",
     "is_finished_work",
     "ONGOING_TYPES",
+    "GitHubRateLimited",
 ]
