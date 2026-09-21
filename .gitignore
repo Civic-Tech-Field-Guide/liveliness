@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+dist/
+*.egg-info/
+
+# The eval set holds copies of other people's pages. This repository publishes
+# the method, not the material, so only the result of running it is committed.
+eval/adjudication-set.jsonl
