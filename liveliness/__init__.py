@@ -3,7 +3,8 @@ Work out whether a civic tech project is still alive.
 
     from liveliness import Project, score_project
 
-    result = score_project(Project(name="Example", website="https://example.org"))
+    repo = "https://github.com/Civic-Tech-Field-Guide/liveliness"
+    result = score_project(Project(name="liveliness", website=repo, repo=repo))
 
 `score_project` returns a dict with `score` (0 to 100, or None when there was
 nothing to go on), `activity_status`, `last_activity_date`, `status`, and
