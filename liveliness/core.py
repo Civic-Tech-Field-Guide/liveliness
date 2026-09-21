@@ -7,14 +7,14 @@ score from 0 to 100 with a line-by-line account of how it got there.
 
 The score is only ever as good as what a project puts in public, so the whole
 of the reasoning is returned alongside it. A number without its reasons cannot
-be argued with, and the projects being scored deserve to be able to argue.
+be checked or improved on, and the projects being scored deserve both.
 
     from liveliness import Project, score_project
 
     result = score_project(Project(
-        name="Example",
-        website="https://example.org",
-        repo="https://github.com/example/example",
+        name="liveliness",
+        website="https://github.com/Civic-Tech-Field-Guide/liveliness",
+        repo="https://github.com/Civic-Tech-Field-Guide/liveliness",
     ))
     print(result["score"], result["activity_status"])
     print(result["breakdown"])
@@ -1080,9 +1080,10 @@ CLOSED_CAP = 10
 
 # Where the finding came from is part of the finding. A wording match is a rule
 # anyone can check; a reading is a judgement, and the breakdown says which one
-# this was so a project disputing it knows what to argue with. Written here as
-# one sentence with two openings because apply_adjudications.py rebuilds the
-# same breakdown line hours later, and two copies of this wording would drift.
+# this was, so a project that disagrees knows exactly what to take up. Written
+# here as one sentence with two openings because the same breakdown line is
+# rebuilt when a reading is accepted hours later, and two copies of this
+# wording would drift.
 CLOSURE_SOURCE_WORDING = "The project's own page says"
 CLOSURE_SOURCE_READING = "A reading of the project's own page finds"
 
@@ -1719,11 +1720,11 @@ def render_page_text(url):
 # regexp, written to Airtable in the same second with nothing between it and a
 # listing being retired.
 #
-# So the sweep queues instead. A page the rules cannot settle is written to
-# adjudication/queue.jsonl with its text and with what the run made of it
-# without any reading, and the run carries on. The reading is a separate pass
-# over that file, on hardware already paid for (adjudicate.mjs), and a verdict
-# that would retire a project is held for review rather than written.
+# So this returns the page instead. One the rules cannot settle comes back in
+# result["adjudication"], carrying its text and what the scoring made of it
+# without any reading, and the scoring carries on. Reading it is a separate
+# pass the caller runs, and a verdict that would retire a project is worth
+# holding for review rather than writing.
 #
 # The record's own score is unaffected by the queueing: it is scored exactly as
 # it would have been had no model existed, which is also what it keeps if the

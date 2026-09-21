@@ -26,10 +26,9 @@ Reading pages that build their text in the browser needs a browser: `python -m p
 from liveliness import Project, score_project
 
 result = score_project(Project(
-    name="Example Project",
-    website="https://example.org",
-    repo="https://github.com/example/example",
-    links=[{"url": "https://example.social/@example", "type": "mastodon"}],
+    name="liveliness",
+    website="https://github.com/Civic-Tech-Field-Guide/liveliness",
+    repo="https://github.com/Civic-Tech-Field-Guide/liveliness",
 ))
 
 result["score"]               # 0 to 100, or None when there was nothing to go on
@@ -40,7 +39,7 @@ result["breakdown"]           # the reasoning, line by line
 result["adjudication"]        # set when the rules could not settle the page
 ```
 
-The examples here are not real projects, and this file states no verdict about any project that is. What the scorer says about a real one depends on what that project publishes on the day it is asked, which is the point.
+The example scores this package's own repository, so the only project judged anywhere in this documentation is this one. What the scorer says about a real one depends on what that project publishes on the day it is asked, which is the point.
 
 To watch it work, hand it somewhere to write:
 
