@@ -2,7 +2,7 @@
 
 Works out whether a project is still alive from what it publishes: its website, its code repository, its feeds and its social accounts. Returns a score from 0 to 100 and the reasoning that produced it.
 
-This is the algorithm behind the activity scores on the [Civic Tech Field Guide](https://civictech.guide), extracted so anyone can read it, run it on their own data, and argue with it. The directory it was built for is not in here. What is in here is how a project gets judged.
+This is the algorithm behind the activity scores on the [Civic Tech Field Guide](https://civictech.guide), extracted so anyone can read it, run it on their own data, and suggest improvements. The directory it was built for is not in here. What is in here is how a project gets judged.
 
 ## Why the reasoning comes back with the score
 
