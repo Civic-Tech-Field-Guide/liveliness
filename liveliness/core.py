@@ -769,6 +769,45 @@ def check_blog_feed(url):
     return _parse_feed_latest(url) if url else None
 
 
+def latest_blog_date(stored_feeds, website_url, url_class):
+    """
+    The newest post date across a project's feeds, or None.
+
+    A stored feed is tried first. When nothing is stored, the homepage is
+    searched for one. A stored feed that yields no date is searched from as
+    well, because the field often holds the blog's own HTML page rather than
+    its feed: /blog/ parses to no entries, and before this the stored value
+    stopped discovery from running at all, so a WordPress site advertising a
+    feed on every page scored as having no blog.
+    """
+    stored = list(filter(None, stored_feeds or []))
+    feeds  = list(stored)
+    if not feeds and website_url and url_class == "homepage":
+        auto_feed = discover_feed_url(website_url)
+        if auto_feed:
+            _log(f"    blog     → auto-discovered feed: {auto_feed}")
+            feeds = [auto_feed]
+
+    def newest(urls, best):
+        for feed_url in urls:
+            d = reject_future(check_blog_feed(feed_url))
+            if d and (best is None or d > best):
+                best = d
+        return best
+
+    blog_date = newest(feeds, None)
+    if blog_date is None and stored:
+        tried = set(feeds)
+        pages = stored + ([website_url] if website_url and url_class == "homepage" else [])
+        for page in pages:
+            found = discover_feed_url(page)
+            if found and found not in tried:
+                tried.add(found)
+                _log(f"    blog     → stored feed gave no date; found {found}")
+                blog_date = newest([found], blog_date)
+    return blog_date
+
+
 def check_url_alive(url):
     """Quick HEAD check. Returns True / False / None (error)."""
     if not url:
@@ -1982,17 +2021,7 @@ def score_project(project):
     time.sleep(0.3)  # respect GitHub rate limits
 
     # ── Blog feeds ───────────────────────────────────────────────────────────
-    blog_date = None
-    explicit_feeds = list(filter(None, project.feeds))
-    if not explicit_feeds and website_url and url_class == "homepage":
-        auto_feed = discover_feed_url(website_url)
-        if auto_feed:
-            _log(f"    blog     → auto-discovered feed: {auto_feed}")
-            explicit_feeds = [auto_feed]
-    for feed_url in explicit_feeds:
-        d = reject_future(check_blog_feed(feed_url))
-        if d and (blog_date is None or d > blog_date):
-            blog_date = d
+    blog_date = latest_blog_date(project.feeds, website_url, url_class)
     _log(f"    blog     → latest post: {blog_date}")
 
     # ── Social links: recency + accessibility ────────────────────────────────
