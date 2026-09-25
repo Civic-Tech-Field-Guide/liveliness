@@ -31,7 +31,7 @@ import socket
 import time
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser as _HTMLParser
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import urljoin, parse_qs, urlparse
 
 import requests
 
@@ -1576,6 +1576,118 @@ def page_date_signals(html, headers, now, text=None):
     return out
 
 
+# ── The project's own news, blog and events pages ────────────────────────────
+#
+# A homepage often carries no date at all while the page one click away lists
+# every post with its date. Reading only the homepage and a feed missed those:
+# a WordPress lab whose blog stopped in 2020 scored Likely Active on a footer
+# copyright year, because the blog page itself was never opened. So the links a
+# homepage gives to its own news, blog, updates and events pages are followed,
+# a few of them, and the newest date listed there is a signal like a blog post.
+
+# Path segments and anchor words that name a page of dated items, across the
+# languages the directory covers. Matched against the last path segment or the
+# anchor text, whole-word, case-insensitively.
+_NEWS_WORDS = (
+    r"blog|blogs|news|updates|press|newsroom|stories|articles|posts|journal|"
+    r"events|event|calendar|announcements|media|"
+    r"noticias|novedades|prensa|eventos|agenda|actualidad|"
+    r"not[íi]cias|novidades|imprensa|"
+    r"actualit[ée]s|nouvelles|[ée]v[ée]nements|"
+    r"nachrichten|neuigkeiten|aktuelles|veranstaltungen|termine|"
+    r"notizie|eventi|nieuws|evenementen|nyheter|uutiset|haberler|"
+    r"berita|kegiatan|acara|artikel|habari|matukio|"
+    r"新闻|消息|活动|動態|お知らせ|ニュース|イベント|活動報告|소식|뉴스|행사"
+)
+_NEWS_RE = re.compile(r"(?:^|[\W_])(?:%s)(?:$|[\W_])" % _NEWS_WORDS, re.I | re.U)
+
+# Pages followed per record. Each costs one fetch inside the per-record time
+# budget, and the first two nearly always include the one that matters.
+NEWS_PAGES_MAX = 2
+
+# A date with a day, a month name and a year, standing on its own in the text:
+# "October 7, 2020", "7 October 2020", "7 de octubre de 2020". An index page
+# lists its items like this without a label in front, which is exactly what
+# page_date_signals does not read, since on an ordinary page an unlabelled date
+# is as likely to be a founding date as a post. On a page of dated items the
+# newest one is the signal; an old founding date loses to it by construction.
+_BARE_DATE_RE = re.compile(
+    r"(?:%s%s\s+%s{3,12}\.?%s\s+\d{4})|(?:%s{3,12}\.?\s+\d{1,2},?\s+\d{4})"
+    % (r"\d{1,2}", r"(?:\.|\s+de|\s+of)?", r"[^\W\d_]", r"(?:\s+de)?", r"[^\W\d_]"),
+    re.U)
+
+
+def find_news_pages(html, base_url, limit=NEWS_PAGES_MAX):
+    """
+    Links on the homepage to the site's own news, blog or events pages.
+
+    Same host only: a link out to Medium is a feed or a social account, and is
+    already handled as one. Blog and news are preferred to events, since an
+    events page can list an annual meeting that says little about the rest.
+    """
+    if not html:
+        return []
+    host = urlparse(base_url).netloc.lower().removeprefix("www.")
+    parser = _LinkExtractor()
+    try:
+        parser.feed(html)
+    except Exception:
+        return []
+    found = {}
+    for href, text in parser.links:
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        url = urljoin(base_url, href).split("#")[0]
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            continue
+        if parsed.netloc.lower().removeprefix("www.") != host:
+            continue
+        if re.search(r"\.(?:pdf|docx?|xlsx?|pptx?|zip|jpe?g|png|gif|svg|mp[34])$", parsed.path, re.I):
+            continue
+        last = [seg for seg in parsed.path.split("/") if seg][-1:] or [""]
+        if not (_NEWS_RE.search(last[0]) or _NEWS_RE.search(text or "")):
+            continue
+        if url.rstrip("/") == base_url.rstrip("/") or url in found:
+            continue
+        events = bool(re.search(r"event|agenda|calendar|evento|[ée]v[ée]nement|veranstaltung|termine|acara|イベント|活动|행사", url + " " + (text or ""), re.I))
+        found[url] = 1 if events else 0
+    return sorted(found, key=lambda u: found[u])[:limit]
+
+
+def news_page_dates(url, now):
+    """(datetime, label) pairs for the dated items one news or events page lists."""
+    html, headers = get_page_cached(url)
+    if not html:
+        return []
+    out = [(dt, lbl) for dt, lbl in page_date_signals(html, headers, now)
+           if lbl != "the server's Last-Modified header"]
+    words = readable_page(html)["text"]
+    for raw in _BARE_DATE_RE.findall(words[:12000]):
+        dt = _parse_date_loose(raw, now)
+        # Today's date, unlabelled, is a header widget far more often than a
+        # post: news templates print the current date above the masthead, and
+        # believing it would score every such site as updated this morning.
+        if dt and (now - dt).days >= 2:
+            out.append((dt, "a dated item"))
+    return [(dt, lbl) for dt, lbl in out if reject_future(dt)]
+
+
+def latest_news_date(html, base_url, now):
+    """The newest date on the site's own news, blog or events pages, and where."""
+    best = None
+    for url in find_news_pages(html, base_url):
+        dates = news_page_dates(url, now)
+        if dates:
+            dt = max(d for d, _ in dates)
+            _log(f"    news     → {url}: newest item {dt:%Y-%m-%d}")
+            if best is None or dt > best[0]:
+                best = (dt, url)
+        else:
+            _log(f"    news     → {url}: nothing dated")
+    return best
+
+
 def footer_copyright_year(html):
     """
     The newest year in a copyright line in the footer, or None.
@@ -2149,10 +2261,14 @@ def score_project(project):
                 pdt, plabel = max(page_signals, key=lambda c: c[0])
                 candidates.append((page_recency_score(pdt, now), pdt, plabel))
                 _log(f"    page     → {plabel}: {pdt:%Y-%m-%d}")
+            news = latest_news_date(page_html, website_url, now) if page_html else None
+            if news:
+                candidates.append((recency_base_score(news[0], now), news[0],
+                                   "Newest item on the site's own news page"))
             page_closed, page_closed_phrase = page_says_closed(page_html, now, text=rendered)
             if page_closed:
                 _log(f"    page     → says it has closed: {page_closed_phrase!r}")
-            elif not page_unreadable and not page_signals:
+            elif not page_unreadable and not page_signals and not news:
                 # The wording check found nothing and neither did any date. This
                 # is the narrow band the rules cannot settle, so it is the only
                 # band worth queueing for a reading. The run does not wait for
