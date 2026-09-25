@@ -50,3 +50,26 @@ def test_two_projects_do_not_share_their_default_lists():
     a, b = Project(name="a"), Project(name="b")
     a.feeds.append("https://example.org/feed")
     assert b.feeds == []
+
+
+def test_a_stored_blog_page_is_searched_for_its_feed(monkeypatch):
+    # The Blog feed field often holds the blog's HTML page, which parses to no
+    # entries. The feed that page advertises is what carries the dates.
+    from datetime import datetime, timezone
+    from liveliness import core
+    posted = datetime(2020, 11, 10, tzinfo=timezone.utc)
+    monkeypatch.setattr(core, "check_blog_feed",
+                        lambda u: posted if u == "https://x.org/feed/" else None)
+    monkeypatch.setattr(core, "discover_feed_url", lambda u: "https://x.org/feed/")
+    assert core.latest_blog_date(["https://x.org/blog/"], "https://x.org/", "homepage") == posted
+
+
+def test_a_stored_feed_that_works_is_not_second_guessed(monkeypatch):
+    from datetime import datetime, timezone
+    from liveliness import core
+    posted = datetime(2026, 9, 1, tzinfo=timezone.utc)
+    monkeypatch.setattr(core, "check_blog_feed", lambda u: posted)
+    def no_discovery(u):
+        raise AssertionError("discovery should not run")
+    monkeypatch.setattr(core, "discover_feed_url", no_discovery)
+    assert core.latest_blog_date(["https://x.org/feed/"], "https://x.org/", "homepage") == posted
