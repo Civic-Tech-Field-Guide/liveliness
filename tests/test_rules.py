@@ -102,7 +102,22 @@ def test_an_undated_stamp_of_today_is_not_a_post(monkeypatch):
     from datetime import datetime, timezone
     from liveliness import core
     now = datetime(2026, 9, 25, tzinfo=timezone.utc)
-    page = "<html><body><header>Friday, September 25, 2026</header><p>March 2, 2019</p></body></html>"
+    page = "<html><body><header>Friday, September 25, 2026</header><p>March 2, 2019</p><p>January 5, 2019</p></body></html>"
     monkeypatch.setattr(core, "get_page_cached", lambda u: (page, {}))
     dt, _ = max(core.news_page_dates("https://x.org/news/", now))
     assert dt.year == 2019
+
+
+def test_the_organizations_own_name_is_not_a_news_link():
+    from liveliness import core
+    home = '<a href="/about/">Te Hiku Media</a><a href="/news/">News</a>'
+    assert core.find_news_pages(home, "https://x.org/") == ["https://x.org/news/"]
+
+
+def test_a_page_with_one_date_is_not_a_page_of_items(monkeypatch):
+    from datetime import datetime, timezone
+    from liveliness import core
+    now = datetime(2026, 9, 25, tzinfo=timezone.utc)
+    about = "<html><body><p>We started on 30 May 2013.</p></body></html>"
+    monkeypatch.setattr(core, "get_page_cached", lambda u: (about, {}))
+    assert core.news_page_dates("https://x.org/about/", now) == []

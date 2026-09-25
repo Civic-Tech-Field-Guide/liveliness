@@ -1589,8 +1589,8 @@ def page_date_signals(html, headers, now, text=None):
 # languages the directory covers. Matched against the last path segment or the
 # anchor text, whole-word, case-insensitively.
 _NEWS_WORDS = (
-    r"blog|blogs|news|updates|press|newsroom|stories|articles|posts|journal|"
-    r"events|event|calendar|announcements|media|"
+    r"blog|blogs|news|updates|press|newsroom|stories|articles|posts|"
+    r"events|event|calendar|announcements|"
     r"noticias|novedades|prensa|eventos|agenda|actualidad|"
     r"not[íi]cias|novidades|imprensa|"
     r"actualit[ée]s|nouvelles|[ée]v[ée]nements|"
@@ -1604,6 +1604,9 @@ _NEWS_RE = re.compile(r"(?:^|[\W_])(?:%s)(?:$|[\W_])" % _NEWS_WORDS, re.I | re.U
 # Pages followed per record. Each costs one fetch inside the per-record time
 # budget, and the first two nearly always include the one that matters.
 NEWS_PAGES_MAX = 2
+
+# Distinct dates a page has to list before it counts as a page of dated items.
+NEWS_MIN_DATES = 2
 
 # A date with a day, a month name and a year, standing on its own in the text:
 # "October 7, 2020", "7 October 2020", "7 de octubre de 2020". An index page
@@ -1646,7 +1649,11 @@ def find_news_pages(html, base_url, limit=NEWS_PAGES_MAX):
         if re.search(r"\.(?:pdf|docx?|xlsx?|pptx?|zip|jpe?g|png|gif|svg|mp[34])$", parsed.path, re.I):
             continue
         last = [seg for seg in parsed.path.split("/") if seg][-1:] or [""]
-        if not (_NEWS_RE.search(last[0]) or _NEWS_RE.search(text or "")):
+        # Anchor text only counts when it is short. A long anchor is usually
+        # the organization's own name ("Te Hiku Media", "Kloop News Agency")
+        # linking to its About page, which lists a founding date, not posts.
+        short_text = text if text and len(text.split()) <= 3 else ""
+        if not (_NEWS_RE.search(last[0]) or _NEWS_RE.search(short_text)):
             continue
         if url.rstrip("/") == base_url.rstrip("/") or url in found:
             continue
@@ -1670,7 +1677,13 @@ def news_page_dates(url, now):
         # believing it would score every such site as updated this morning.
         if dt and (now - dt).days >= 2:
             out.append((dt, "a dated item"))
-    return [(dt, lbl) for dt, lbl in out if reject_future(dt)]
+    out = [(dt, lbl) for dt, lbl in out if reject_future(dt)]
+    # A page of dated items lists more than one. A single date is an About
+    # page's founding year or one article's byline, and on its own it is too
+    # thin to say when the project was last active.
+    if len({dt.date() for dt, _ in out}) < NEWS_MIN_DATES:
+        return []
+    return out
 
 
 def latest_news_date(html, base_url, now):
