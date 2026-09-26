@@ -440,6 +440,42 @@ def check_website(url):
 RELINK_PENALTY = 15   # the listed page is gone, but the site it sat on is not
 
 
+# Public resolvers asked over HTTPS when the local lookup finds nothing. The
+# machine running the check has its own resolver, and it can fail on a zone
+# that resolves everywhere else: a national government domain answered to
+# public DNS and to a person's browser while the check's resolver returned no
+# such host, which scored a live site as a vanished one. HTTPS rather than
+# port 53, because port 53 is the thing most often filtered on a CI runner.
+DOH_RESOLVERS = (
+    ("https://cloudflare-dns.com/dns-query", {"accept": "application/dns-json"}),
+    ("https://dns.google/resolve", {}),
+)
+DOH_TIMEOUT_S = 8
+
+
+def _doh_resolves(host):
+    """
+    True when a public resolver finds an address, False when every one that
+    answered says the name has none, None when none of them could be asked.
+    """
+    said_no = False
+    for endpoint, headers in DOH_RESOLVERS:
+        try:
+            r = SESSION.get(endpoint, params={"name": host, "type": "A"},
+                            headers=headers, timeout=DOH_TIMEOUT_S)
+            if r.status_code != 200:
+                continue
+            data = r.json()
+        except Exception:
+            continue
+        if data.get("Status") == 0 and any(a.get("type") in (1, 28, 5)
+                                           for a in data.get("Answer") or []):
+            return True
+        if data.get("Status") in (0, 3):     # NOERROR with no address, or NXDOMAIN
+            said_no = True
+    return False if said_no else None
+
+
 def host_resolves(url):
     """
     False only when the hostname genuinely does not resolve.
@@ -448,6 +484,10 @@ def host_resolves(url):
     that no longer does, so a lookup succeeds with no address. Any error other
     than "no such host" is treated as unknown rather than absent, since a
     resolver problem is not evidence about the project.
+
+    "No such host" from the local resolver is checked with public resolvers
+    before it is believed. If they find the host, the site exists for everyone
+    but this machine, and the answer is None: nothing can be said from here.
     """
     host = (urlparse(url).hostname or "").strip()
     if not host:
@@ -456,7 +496,12 @@ def host_resolves(url):
         socket.getaddrinfo(host, None)
         return True
     except socket.gaierror:
-        return False
+        elsewhere = _doh_resolves(host)
+        if elsewhere is True:
+            _log(f"    website  → {host} does not resolve here but public DNS finds it; "
+                 f"left unjudged")
+            return None
+        return False if elsewhere is False else None
     except Exception:
         return None
 
@@ -488,8 +533,14 @@ def probe_site(url):
         # A wall is worth another attempt through a browser; a timeout is not.
         return None, archived, "blocked" if why == "blocked" else "unknown"
 
-    if host_resolves(url) is False:
+    resolves = host_resolves(url)
+    if resolves is False:
         return False, archived, "no-host"
+    if resolves is None:
+        # The name could not be settled, most often because it resolves for
+        # everyone but the machine running the check. A site that cannot be
+        # reached from here is not a site that is gone.
+        return None, archived, "unknown"
 
     root = site_root(url)
     if root:
