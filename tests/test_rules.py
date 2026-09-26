@@ -121,3 +121,31 @@ def test_a_page_with_one_date_is_not_a_page_of_items(monkeypatch):
     about = "<html><body><p>We started on 30 May 2013.</p></body></html>"
     monkeypatch.setattr(core, "get_page_cached", lambda u: (about, {}))
     assert core.news_page_dates("https://x.org/about/", now) == []
+
+
+def _no_local_dns(monkeypatch, core):
+    import socket
+    def fail(*a, **k):
+        raise socket.gaierror(8, "nodename nor servname provided")
+    monkeypatch.setattr(core.socket, "getaddrinfo", fail)
+
+
+def test_a_host_public_dns_can_find_is_not_gone(monkeypatch):
+    from liveliness import core
+    _no_local_dns(monkeypatch, core)
+    monkeypatch.setattr(core, "_doh_resolves", lambda h: True)
+    assert core.host_resolves("https://datos.example.gov.py/") is None
+
+
+def test_a_host_nobody_can_find_is_gone(monkeypatch):
+    from liveliness import core
+    _no_local_dns(monkeypatch, core)
+    monkeypatch.setattr(core, "_doh_resolves", lambda h: False)
+    assert core.host_resolves("https://gone.example/") is False
+
+
+def test_an_unsettled_host_is_not_ruled_dead(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "check_website", lambda u: (False, False, None))
+    monkeypatch.setattr(core, "host_resolves", lambda u: None)
+    assert core.probe_site("https://x.example/") == (None, False, "unknown")
