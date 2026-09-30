@@ -415,11 +415,10 @@ def check_website(url):
     return alive, False, why
 
 
-# find_wayback_url() was removed with the Website URL replacement it fed. Picking
-# a snapshot belongs to the curator's dead-link triage, which chooses the one
+# No archive snapshot is looked up here. Picking a snapshot belongs to the curator's dead-link triage, which chooses the one
 # nearest the project's last known activity rather than the newest (the newest is
 # often already a parked-domain page) and rate-limits itself to Wayback's ~15
-# requests/minute. Nothing in this scorer should reintroduce it.
+# requests/minute.
 
 
 # ── Telling a dead project from a moved page ──────────────────────────────────
@@ -431,20 +430,14 @@ def check_website(url):
 # the commonest case of the two. Scoring both as "website did not respond" and
 # subtracting 50 buries the difference, and the relink cases are exactly the
 # listings most worth keeping, since only the link is stale.
-#
-# Three pages out of ten sampled on 2026-09-16 were relinks: a competition
-# whose host had moved, a feature page on a large NGO's site, and a country
-# page on another. All three organisations were live, and reading the move as
-# an ending would have retired all three.
 
 RELINK_PENALTY = 15   # the listed page is gone, but the site it sat on is not
 
 
 # Public resolvers asked over HTTPS when the local lookup finds nothing. The
 # machine running the check has its own resolver, and it can fail on a zone
-# that resolves everywhere else: a national government domain answered to
-# public DNS and to a person's browser while the check's resolver returned no
-# such host, which scored a live site as a vanished one. HTTPS rather than
+# that resolves everywhere else, and reading that as a vanished host would
+# score a live site as gone. HTTPS rather than
 # port 53, because port 53 is the thing most often filtered on a CI runner.
 DOH_RESOLVERS = (
     ("https://cloudflare-dns.com/dns-query", {"accept": "application/dns-json"}),
@@ -827,9 +820,8 @@ def latest_blog_date(stored_feeds, website_url, url_class):
     A stored feed is tried first. When nothing is stored, the homepage is
     searched for one. A stored feed that yields no date is searched from as
     well, because the field often holds the blog's own HTML page rather than
-    its feed: /blog/ parses to no entries, and before this the stored value
-    stopped discovery from running at all, so a WordPress site advertising a
-    feed on every page scored as having no blog.
+    its feed: /blog/ parses to no entries, while the page itself advertises
+    the real feed.
     """
     stored = list(filter(None, stored_feeds or []))
     feeds  = list(stored)
@@ -1129,10 +1121,9 @@ def check_social_recency(url):
 # ── Scoring ───────────────────────────────────────────────────────────────────
 
 # A social page that loads says nothing about whether anything was posted to it,
-# so reachability is weak evidence and is capped to a nudge. At 10 points per
-# link up to three it was worth +30, enough to carry a listing with no dated
-# signal anywhere past a threshold: a live homepage and three loading social
-# pages scored 45 and read Likely Active on nothing but pages existing. Posting
+# so reachability is weak evidence and is capped to a nudge. Uncapped, a live
+# homepage and a few loading social pages would carry a listing with no dated
+# signal anywhere into Likely Active on nothing but pages existing. Posting
 # recency is scored separately by social_recency_score(), which is unaffected.
 SOCIAL_REACHABLE_BONUS_MAX = 10
 
@@ -1182,8 +1173,8 @@ def closure_sentence(source, phrase, capped=""):
     """The breakdown line for a page that says the thing it describes is over."""
     # The sentence supplies the quotation marks, so a phrase that arrives
     # already quoted must not bring its own. A reading often quotes the page
-    # itself, and nesting the two produced a breakdown that opened on a double
-    # quote mark and read as a typo to anyone looking at the profile page.
+    # itself, and nesting the two would open the breakdown line on a double
+    # quote mark.
     phrase = re.sub(r'^[\s"\u201c\u201d\u00ab\u00bb\u2018\u2019]+|'
                     r'[\s"\u201c\u201d\u00ab\u00bb\u2018\u2019]+$', "", str(phrase or ""))
     phrase = phrase.replace('"', "\u201d")
@@ -1332,9 +1323,8 @@ def recently_launched(project, now):
 
 # ── What the page says about itself ───────────────────────────────────────────
 #
-# Until now the only dated signals were GitHub, a blog feed and social posts, so
-# a project with a plain website could not produce a date however plainly the
-# page stated one. check_website() fetched the page and kept only alive/dead.
+# Many projects have nothing but a website, so the dates a page states about
+# itself are the only dated signal they can offer.
 #
 # _decode_entities, _clean, meta_content and readable_page are ports of
 # CTFG-curator lib/page-fetch.mjs, which already solved the two awkward parts:
@@ -1388,9 +1378,7 @@ def readable_page(html, text_cap=12000, footer_cap=800):
 
 # Month names in the languages this directory actually meets. A date is a
 # recency signal whatever language the page is written in, and reading only
-# English ones meant a federal ministry publishing several times a week and a
-# département running a 2026 budget consultation were both recorded as pages
-# with no date on them at all.
+# English ones would leave most of the directory's pages with no readable date.
 #
 # West and South Slavic month names are deliberately absent. They collide
 # across languages in the one way that matters: "listopad" is November in
@@ -1539,8 +1527,8 @@ _META_DATE_PROPS = ["article:modified_time", "og:updated_time", "article:publish
 # capture is a lookahead so the match itself ends at the keyword. A page that
 # prints "Published: 6 January 2026 Last updated: 20 March 2026" as two stacked
 # lines collapses to one line of text once the tags are stripped, and a
-# consuming capture swallowed the second label with the first date, reporting
-# the older of the two as the page's date.
+# consuming capture would swallow the second label with the first date and
+# report the older of the two as the page's date.
 #
 # Longest first, so "last updated" is not matched as "updated" and "última
 # atualização" is not matched as "atualizado".
@@ -1630,9 +1618,8 @@ def page_date_signals(html, headers, now, text=None):
 # ── The project's own news, blog and events pages ────────────────────────────
 #
 # A homepage often carries no date at all while the page one click away lists
-# every post with its date. Reading only the homepage and a feed missed those:
-# a WordPress lab whose blog stopped in 2020 scored Likely Active on a footer
-# copyright year, because the blog page itself was never opened. So the links a
+# every post with its date, including an old one that shows the blog has
+# stopped. So the links a
 # homepage gives to its own news, blog, updates and events pages are followed,
 # a few of them, and the newest date listed there is a signal like a blog post.
 
@@ -1773,16 +1760,15 @@ def footer_copyright_year(html):
 # ── Reading a page that builds itself in the browser ──────────────────────────
 #
 # Roughly a tenth of reachable project sites serve a shell to a plain fetch and
-# paint everything that matters after the JavaScript runs — including, on one
-# consultation, the notice that it had closed months earlier. Those pages are
+# paint everything that matters after the JavaScript runs, sometimes including
+# a notice that the project has closed. Those pages are
 # re-read through a real browser, and only those: rendering every page would
 # multiply the run for no gain on the nine in ten that are already readable.
 #
 # Ported from CTFG-curator server.js (renderPageText / maybeRenderThinPage),
 # including the resource blocking, the bounded networkidle wait and the settle
 # afterwards. Everything here fails soft: no Playwright, no browser, a crash
-# mid-render — all return None and leave the listing recorded as unread, which
-# is what it was before this existed.
+# mid-render: all return None and leave the listing recorded as unread.
 
 RENDER_THIN_PAGES = os.environ.get("RENDER_THIN_PAGES", "1") != "0"
 RENDER_GOTO_MS    = 15_000
@@ -1997,7 +1983,7 @@ _CLOSURE_PATTERNS = [
     # "no longer accepting submissions", "we are no longer taking applications"
     re.compile(r"\bno longer (?:accepting|taking|open to|receiving)\b", re.I),
     # A passed deadline is an intake window closing, not the thing ending, so it
-    # is no longer read as a closure on its own.
+    # is not read as a closure on its own.
     # "this project has ended", "the programme is now closed"
     re.compile(r"\bthis (?:project|programme|program|pilot|initiative|campaign)\s+"
                r"(?:has |had )?(?:ended|closed|finished|concluded|wound down)\b", re.I),
@@ -2070,10 +2056,8 @@ def website_alive_bonus(best_date, now):
     return WEBSITE_ALIVE_BONUS_STALE
 
 
-# Where "a while ago" stops meaning likely active. At two years, a project
-# silent since its last post still scored into the Likely Active band, so a
-# listing whose last blog post was in 2024 read as likely running well into
-# 2026. Anything past this now has to clear Possibly Inactive on other evidence.
+# Where "a while ago" stops meaning likely active. A project silent for longer
+# than this has to clear Possibly Inactive on other evidence.
 STALE_AFTER_DAYS = 548   # eighteen months
 
 
@@ -2238,8 +2222,8 @@ def score_project(project):
             _log(f"    social   → {platform}: last post {dt.date()}")
 
     # No cap on the count here: SOCIAL_REACHABLE_BONUS_MAX already caps what
-    # reachability is worth, so capping the count too changed no score and only
-    # made the breakdown under-report how many accounts were actually reached.
+    # reachability is worth, and the breakdown should report how many accounts
+    # were actually reached.
 
     # ── Combine all signals ───────────────────────────────────────────────────
     # Every dated signal becomes a (points, date, label) candidate. The score is
@@ -2529,9 +2513,7 @@ def score_project(project):
     # A finished piece of work is N/A, and it outranks anything the signals say.
     # A report does not stop being a report because the site hosting it went
     # down, and Inactive on one reads as a project that ended, which is a claim
-    # about something that was never running in the first place. This used to be
-    # decided only by a sweep over the first hundred rows of the table, so a
-    # report outside that page was scored like a project and retired like one.
+    # about something that was never running in the first place.
     #
     # is_na_candidate() carries the guard that keeps an organization which
     # published something out of this: an ongoing type beside the Document wins.
@@ -2561,8 +2543,7 @@ def score_project(project):
 
         # A single failed fetch is not proof a site has gone. _try_fetch()
         # already retries a connection error once, and a blip lasting seconds
-        # survives that: a federal ministry's site was recorded as not
-        # responding on one run and answered normally minutes later. Since this
+        # survives that. Since this
         # verdict removes the record from the queue for good, an unreachable
         # site is checked once more before it counts, far enough after the first
         # attempt to outlast a blip. Only the handful of records heading for
