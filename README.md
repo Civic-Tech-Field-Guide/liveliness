@@ -2,11 +2,11 @@
 
 Works out whether a project is still alive from what it publishes: its website, its code repository, its feeds and its social accounts. Returns a score from 0 to 100 and the reasoning that produced it.
 
-This is the algorithm behind the activity scores on the [Civic Tech Field Guide](https://civictech.guide), extracted so anyone can read it, run it on their own data, and suggest improvements. The directory it was built for is not in here. What is in here is how a project gets judged.
+This is the algorithm behind the activity scores on the [Civic Tech Field Guide](https://civictech.guide), published so anyone can read it, run it on their own data, and suggest improvements. The directory it was built for is not in here. What is in here is how a project gets judged.
 
 ## Why the reasoning comes back with the score
 
-A number on its own cannot be argued with. If a project is marked inactive and disagrees, the only useful answer is the specific thing that was looked at and the date that was found, so `breakdown` carries every line of that and is meant to be shown to the project being scored.
+A number on its own cannot be argued with. If a project is marked inactive and disagrees, the useful answer is the specific thing that was looked at and the date that was found. `breakdown` carries every line of that, and is meant to be shown to the project being scored.
 
 ## Install
 
@@ -16,9 +16,9 @@ Not on PyPI yet.
 pip install git+https://github.com/Civic-Tech-Field-Guide/liveliness
 ```
 
-Two optional environment variables raise the ceiling on what can be checked. `GITHUB_TOKEN` takes the GitHub API from 60 calls an hour to 5,000, and a repository costs 4 to 6 calls. `YOUTUBE_API_KEY` is what makes a YouTube channel's last upload readable; without it the channel is checked only for being reachable.
+Two optional environment variables raise the ceiling on what can be checked. `GITHUB_TOKEN` takes the GitHub API from 60 calls an hour to 5,000 with a personal access token. A repository costs 4 or 5 calls, and one or two more when you pass an account rather than a repository. `YOUTUBE_API_KEY` makes a YouTube channel's last upload readable; without it the channel is only checked for being reachable.
 
-Reading pages that build their text in the browser needs a browser: `python -m playwright install chromium`. About one reachable site in ten needs this. Without it those pages are recorded as unread rather than as empty, so nothing is scored wrongly, there is just less to go on.
+Pages that build their text in the browser need a browser to read: `python -m playwright install chromium`. Without it those pages are recorded as unread rather than as empty.
 
 ## Use
 
@@ -36,10 +36,11 @@ result["activity_status"]     # Active | Likely Active | Possibly Inactive | Ina
 result["last_activity_date"]  # the most recent date found, ISO 8601, or None
 result["status"]              # Active | Inactive | N/A, only where it is unambiguous
 result["breakdown"]           # the reasoning, line by line
+result["discovered_url"]      # the homepage, when the website given was an article about the project
 result["adjudication"]        # set when the rules could not settle the page
 ```
 
-The example scores this package's own repository, so the only project judged anywhere in this documentation is this one. What the scorer says about a real one depends on what that project publishes on the day it is asked, which is the point.
+The example scores this package's own repository, so the only project judged anywhere in this documentation is this one.
 
 To watch it work, hand it somewhere to write:
 
@@ -48,11 +49,20 @@ from liveliness import set_logger
 set_logger(print)
 ```
 
-`Project` takes only a name; everything else is used if present. See `liveliness/project.py` for what each field means.
+`Project` takes only a name. Every other field is used if present, and a field left empty is never counted against the project. See `liveliness/project.py` for what each field means.
+
+| Field | What it is |
+| --- | --- |
+| `website` | The project's home on the web. An article about the project also works: the scorer follows its links to find the homepage. |
+| `repo` | A GitHub repository, or a GitHub account, in which case its most recently pushed repository is read. |
+| `feeds` | RSS or Atom feeds. The homepage is searched for one as well. |
+| `links` | Social and other accounts, as `{"url": ..., "type": ...}`. Accounts linked from the homepage are added to these. |
+| `types`, `formats` | What kind of thing this is. A finished piece of work, such as a report or a book, is recorded as N/A rather than scored. |
+| `launch_flag`, `added` | Marks a recent launch, and when the project was added to your directory. |
 
 ## What it will not do
 
-It does not decide anything it cannot show you. Where the wording rules find nothing and no date can be read, the result carries an `adjudication` entry rather than a guess, and the score stands as though no reading had happened. What to do with that is the caller's call: the Field Guide sends those pages to a language model and holds any reading that would retire a project until a person accepts it. See `eval/README.md` for how well that works and where it has not been measured.
+It does not decide anything it cannot show you. Where the rules find no date and no statement that the project has ended, the result carries an `adjudication` entry rather than a guess, and the score stands as though no reading had happened. What to do with that is up to the caller. The Field Guide sends those pages to a language model and holds any reading that would retire a project until a person accepts it. See `eval/README.md` for how well that works and where it has not been measured.
 
 It does not judge quality, popularity or worth. It reads recency, and recency is not the same as mattering.
 
@@ -60,103 +70,84 @@ It does not judge quality, popularity or worth. It reads recency, and recency is
 
 | Source | What is checked |
 | --- | --- |
-| Website | Responds at all. 403 and 429 count as indeterminate, not dead, because they are usually bot blocking. A hard connection error is retried once before the site is called dead. An article URL is followed to find the project homepage. If the Website URL already points at an archive snapshot, the original URL is extracted and tried first, and the project counts as live if the original answers. Liveness is judged by where a fetch lands, not by the status code alone: a domain whose owner has pointed it at a snapshot of itself answers 200 from an archive host, and does not count as live. A hostname the check's own DNS cannot find is looked up again through public resolvers (Cloudflare and Google, over HTTPS) before the site is called gone; if they find it, the site is left unjudged rather than scored as vanished. |
-| GitHub | Last push, latest release, last commit, maintainer activity on issues and PRs, how much of the recent issue traffic got resolved, and whether the repo is archived. A profile URL is resolved to that account's most recently pushed repo. |
-| Blog | Latest entry in an RSS or Atom feed, either one you supply or one discovered on the homepage. A supplied feed that yields no date is often the blog's own page rather than its feed, so the feed that page advertises is looked for too. |
-| News pages | The scorer follows the homepage's links to the site's own blog, news, updates and events pages, up to two of them. It scores the newest dated item it finds there the same way it scores a blog post. The link words cover the directory's main languages, for example noticias, actualités, berita, habari and お知らせ. Links to files are skipped, and an unlabelled date of today or yesterday is ignored, since news templates print the current date in their header. |
-| Social | Last post date for YouTube, Bluesky, Medium, Reddit, Substack and Mastodon. Twitter/X, LinkedIn, Facebook and Instagram are checked for reachability only, since neither exposes a post date. Links come from the ones you supply and from scraping the homepage. |
-| The page itself | What the site says about its own age: schema.org `dateModified` and `datePublished`, the usual meta tags, `time` elements, and visible lines such as "Last updated: 20 March 2026". A footer copyright naming this year or last is read separately as weak evidence that the site is being kept up. A page that says the thing has closed is read as an ending rather than a date. |
+| Website | Whether it responds, and where the request lands. See below for how each kind of failure is read. |
+| GitHub | Last push, latest release, last commit, maintainer activity on issues and pull requests, how much recent issue traffic was resolved, and whether the repository is archived. |
+| Blog | The newest entry in an RSS or Atom feed, either one you supply or one discovered on the homepage. A supplied link that turns out to be the blog's own page rather than its feed is searched for the feed it advertises. |
+| News pages | Up to two of the site's own blog, news, updates or events pages, found from the homepage's links. The newest dated item listed there counts like a blog post. |
+| Social | Last post date for YouTube, Bluesky, Medium, Reddit, Substack and Mastodon or any other fediverse account. X, LinkedIn, Facebook, Instagram, TikTok and Signal expose no post date, so they are checked only for being reachable. |
+| The page itself | Dates the homepage states about itself, a recent copyright year in its footer, and any statement that the project has closed. |
 
-Maintainer activity on issues counts merged PRs, anything opened by an owner, member or
-collaborator, and an outsider's issue closed by somebody other than its author. An outsider
-merely filing an issue does not count, because a dead repo keeps collecting those.
+### Website
 
-The resolution rate answers a different question from that date: not when the tracker was last
-touched, but whether what came in is being dealt with. Of the 20 most recently updated issues
-and PRs, it counts the ones updated in the last 180 days and how many of those were closed or
-merged inside the same window. It is read from the request the issue dates already need, so it
-costs no extra API calls. Below 5 items in the window there is too little traffic to read and
-nothing is applied, which keeps a live two-person project with three issues a year from being
-marked unattended for having nothing to close.
+A request that answers with a success or a redirect counts as live. A certificate error still counts as live, since the site is there.
 
-The window matters. An all-time ratio of closed to open issues never decays, so a repo that
-closed 900 issues between 2015 and 2020 and nothing since still reads as well maintained, which
-is the opposite of what this tool is for.
+A 403 or 429 is usually bot blocking, so it is not read as dead. The page is tried once more through a headless browser, and counts as live only if what comes back is the site and not the bot check. A timeout or a redirect loop is left undetermined. A connection error is retried once, after two seconds, before it counts as a failure.
 
-Until September 2026 the site was fetched only to see whether it answered, and the page
-itself was thrown away. A project whose homepage plainly stated when it was last updated
-produced no date at all, and scored as though nothing had been found. Across thirty sampled
-projects, 52% of reachable sites state a date that can now be read.
+A failure is then looked at more closely, because a missing page and a missing project are different findings:
 
-The server's `Last-Modified` header is believed only when it is at least two days old. A page
-built fresh for each request answers with the time of the request, so one project reached the
-top of the scale on a header that echoed the current second. A real file timestamp is days or
-months old; a server clock never is.
+- If the hostname does not resolve, it is looked up again through public resolvers (Cloudflare and Google, over HTTPS). If they find it, the site is left undetermined. If they do not, the web address no longer exists.
+- If the listed page fails but the root of the same site answers, the page has moved and the organisation has not. This is scored as a stale link, not a dead site.
+- Otherwise the site did not respond.
 
-About one reachable site in ten serves a shell to a plain fetch and paints its text afterwards
-in the browser. Those are re-read through a headless browser, and only those. One project's
-page carried twenty-seven characters of static text, and the notice that it had stopped taking
-reports existed only once its script had run. Where a page cannot be read even after that, the
-project is recorded as unread rather than as a page that said nothing, and its footer
-copyright does not count: a shell's footer is not the project's.
+A request that lands on a web archive, when the address given was not an archive, means the owner has pointed the domain at a snapshot of itself, and does not count as live. When the address given is an archive snapshot, the original address inside it is tried first, and the project counts as live if the original answers.
 
-Any date more than a day in the future is discarded. Commit dates, RSS pubDates and social
-post dates are all set by whoever published them, so a wrong clock or a deliberate stamp can
-otherwise make a stale project score full marks forever.
+A website address on a search engine is skipped as uncheckable. A DuckDuckGo "I'm feeling lucky" link is resolved to where it leads first.
+
+### GitHub
+
+The newest of the push, release, commit and issue dates is the GitHub signal.
+
+Issue dates count only maintainer activity: merged pull requests, anything opened or closed by an owner, member or collaborator, and an outsider's issue closed by somebody other than its author. An outsider filing an issue does not count, because an abandoned repository keeps collecting those.
+
+The resolution rate reads the 20 most recently updated issues and pull requests, keeps the ones updated in the last 180 days, and counts how many of those were closed or merged in the same window. It needs at least 5 items in the window; below that, it is not applied. It comes from the same request as the issue dates, so it costs no extra calls.
+
+### Pages
+
+On the homepage, these count as dates the page states about itself: schema.org `dateModified` and `datePublished`, the usual date meta tags, `time` elements, and labelled lines such as "Last updated: 20 March 2026" in the main languages of the directory. The server's `Last-Modified` header counts only when it is at least two days old, since a page generated for each request reports the time of the request.
+
+A news page counts when it lists at least two distinct dates. Only links on the same site are followed, blog and news pages are preferred over events pages, links to files are skipped, and a link's words count only when they are three words or fewer. The link words cover the directory's main languages, for example noticias, actualités, berita, habari and お知らせ. An unlabelled date of today or yesterday is ignored, because news templates print the current date in their header.
+
+A footer copyright counts when it names this year or last year.
+
+A closure is read from the first 3,000 characters of the page's text, in wording such as "this project has ended" or "no longer accepting submissions". A closure that names a date still in the future is ignored. Registration, applications, nominations, submissions and voting closing do not count, because those close on schedule on projects that are running.
+
+About one reachable site in ten serves an empty shell and builds its text in the browser. A page with fewer than 200 characters of readable text is read again through a headless browser. If it still cannot be read, it is recorded as unread, and its footer copyright does not count.
+
+### Dates
+
+Any date more than a day in the future, or before 2000, is discarded. Commit dates, feed dates and post dates are set by whoever published them, and a wrong clock would otherwise hold a score at the top.
 
 ## Scoring
 
-A GitHub or blog date sets a base score by age: 85 within 90 days, 80 within 180, 70 within a
-year, 55 within eighteen months, 35 within three years, 15 within five, 5 beyond that. That
-boundary sat at two years until September 2026, which meant a project whose last blog post was
-in October 2024 still read as Likely Active most of the way through 2026. A date the page
-states about itself uses the same shape capped at 70: under the 85 a commit earns, because a
-content system stamps `dateModified` when a template changes and a hand-written "last updated"
-line goes stale in place, and over the 55 a social post earns, because it is the project
-talking about itself on its own site. Social dates use the same
-brackets capped at 55 and drop to 0 past a year. An archived GitHub repo caps its own
-contribution at 15, since the maintainers said in as many words that they stopped.
+Every dated signal is turned into points by its age. The best single signal sets the base score. Signals are never added together.
 
-The best single date sets the base score, then the website adjusts it: a live site adds 15 when
-the newest dated signal is within a year and 5 when it is older or absent, a dead one subtracts
-50, and a project a curator has already pointed at an archive snapshot, whose original URL no
-longer answers, is capped at 10. A homepage that loads is evidence of current work only
-alongside something dated and recent, so on its own it earns the reduced bonus. Reachable social links add 10 in total,
-however many there are.
+| Age of the date | GitHub, blog, news page | The page's own date | Social post |
+| --- | --- | --- | --- |
+| 90 days or less | 85 | 70 | 55 |
+| 180 days or less | 80 | 65 | 50 |
+| 1 year or less | 70 | 55 | 45 |
+| 18 months or less | 55 | 40 | 0 |
+| 3 years or less | 35 | 25 | 0 |
+| 5 years or less | 15 | 10 | 0 |
+| Older | 5 | 3 | 0 |
 
-A live site with no dated signal at all used to get a floor of 25. That floor was never a
-measurement, and 25 sits in the Possibly Inactive band, so a working site with no
-machine-readable timestamp anywhere was published as possibly inactive on no evidence. In
-September 2026 that was 64% of every scored project. It now reports Unknown instead, and the
-breakdown says nothing dated was found rather than implying the project was measured and found
-wanting.
+A date the page states about itself scores below a commit, because a content system stamps `dateModified` when a template changes and a hand-written "last updated" line goes stale in place. It scores above a social post, because it is the project describing itself on its own site. An archived GitHub repository counts for at most 15, however recent its last activity.
 
-Three things count as evidence in that otherwise empty case, and each is a floor rather than a
-bonus, so none of them stacks on top of stale evidence to lift an old project into Active:
+The base score is then adjusted, in this order. The score never goes below 0 or above 100.
 
-- A footer copyright naming this year or last floors the score at 45. The site is being kept
-  up even though nothing on it is dated.
-- A project added to your directory within the last nine months whose launch flag is
-  filled in floors at 60. It does not apply where the site failed to answer or the address is
-  an archive snapshot: being added in March says nothing about a domain that stopped answering
-  in August, and the archive cap exists for that reason and was being undone by the floor.
-- A page that says the thing has closed caps the score at 10 instead, the same as an archive
-  snapshot, and outranks everything above it including a recent launch. Something added in
-  March and closed in July was both.
+1. **Issue resolution.** Closing or merging at least half of the recent issue traffic adds 5. Closing none of it subtracts 5. Anything in between changes nothing, and an archived repository is skipped.
+2. **Website.** Only one of these applies:
+   - The address is an archive snapshot and the original does not answer: capped at 10.
+   - The site responds: plus 15 when the newest dated signal is within a year, plus 5 when it is older or there is none.
+   - The listed page has moved but its site still answers: minus 15.
+   - The web address no longer exists: minus 50.
+   - The site did not respond: minus 50.
+3. **Social reachability.** Any social or other account that loads adds 10 in total, however many there are.
+4. **Footer copyright.** A copyright line naming this year or last raises the score to at least 45.
+5. **Recent launch.** A project added to your directory in the last nine months, with its launch flag set, is raised to at least 60. This does not apply when the site did not respond or the address is an archive snapshot.
+6. **Closure.** A page that says the project has closed caps the score at 10. This comes last, so nothing lifts it back up.
 
-The issue tracker adjusts the score by 5 either way, and only at the ends of the range: closing
-or merging at least half of the recent traffic adds 5, and closing none of it subtracts 5. A
-backlog of old issues left open on its own is worth nothing in either direction, since a project
-that triages carefully carries one and a project running a stale bot does not. The adjustment is
-small because it overlaps the issue and PR date that may already have set the base score, and
-because a stale bot closing everything untouched for 60 days inflates it. Telling a bot's
-closure from a maintainer's costs one API call per issue, which a 200-record batch cannot
-afford. An archived repo is skipped: nothing can be closed in one.
-
-A social link counts for reachability only, and that is capped at 10 per project because a page
-that loads says nothing about whether anything was posted to it. Posting recency is scored
-separately and is worth up to 55. Before the cap, three loading social pages were worth 30,
-enough to lift a project with no dated signal anywhere to 45 and report it as Likely Active.
+The two floors, 45 and 60, only ever raise a score. A score that is already higher is left alone.
 
 | Score | Activity status |
 | --- | --- |
@@ -164,15 +155,51 @@ enough to lift a project with no dated signal anywhere to 45 and report it as Li
 | 45 to 69 | Likely Active |
 | 20 to 44 | Possibly Inactive |
 | below 20 | Inactive |
-| nothing checkable | Unknown |
+
+### Unknown
+
+When nothing dated is found anywhere, and there is no closure, recent launch, recent copyright or archive snapshot to go on, the result is Unknown and `score` is `None`. A website that loads shows that the address still resolves, not that anyone is behind it, so it is not scored on its own. A site that did not respond is not Unknown: that is evidence, and it is scored.
+
+### Status
+
+`status` is a firmer verdict than `activity_status`, and is only set at the ends of the range.
+
+- **Active** at 70 and above.
+- **Inactive** below 20, and only when the site cannot be reached or the page says the project has closed. An unreachable site is checked once more, after five seconds, before it counts. A moved page never counts as unreachable. A low score on a site that still answers leaves `status` empty, because a guide or dataset that has not changed in years is still usable while it is up.
+- **N/A** for a finished piece of work, such as a report or a book, whatever its signals say. Anything that also has an ongoing type, such as an organisation that published a report, is scored normally.
+- Empty everywhere else.
+
+## The breakdown
+
+`breakdown` is a plain-text account of how the score was reached. It names the signal that set the base score, lists the other dated signals, and gives each adjustment with its points:
+
+```
+Strongest signal: GitHub push, 8 months ago (70)
+Also found: Bluesky post 30 days ago (55)
+11 of the 20 issues and pull requests active in the last 6 months were closed or merged (+5)
+Website is responding (+15)
+1 social account reachable (+10)
+Total: 100 out of 100 - Active
+```
+
+Each line carries the points actually applied, so the figures always add up to the total. Where the 0 or 100 limit cuts an adjustment short, the line says so.
 
 ## The reading pass
 
-Some pages do not reduce to a keyword. A conference closes registration because it is about to happen; a consultation closes because it is over. Both write "closed" on the page, and a word list that tells them apart for one gets the other wrong.
+Some pages do not reduce to a keyword. A conference closes registration because it is about to happen; a consultation closes because it is over. Both write "closed" on the page.
 
-Those pages come back with `adjudication` set instead of being decided. In the Field Guide they go to a local language model, and a reading that would retire a project waits for a person to accept it. `eval/README.md` records how that was measured: on 35 labelled pages the model agreed with the label 26 times and proposed retiring nothing that was still running. Recall rests on a single page in that set and is not a rate. Read it as an anecdote.
+When a page can be read but the rules find no date on it, no news page, and no closure, the result comes back with `adjudication` set: the project's name, its address and up to 6,000 characters of its text. The score is unaffected. In the Field Guide those pages go to a language model, and a reading that would retire a project waits for a person to accept it. `eval/README.md` records how that was measured.
 
 The eval set itself is not published. It holds copies of other people's pages, and what this repository publishes is the method rather than the material.
+
+## Settings
+
+| Environment variable | Effect |
+| --- | --- |
+| `GITHUB_TOKEN` | Raises the GitHub API limit. |
+| `YOUTUBE_API_KEY` | Reads YouTube upload dates. |
+| `RENDER_THIN_PAGES=0` | Never uses the headless browser. |
+| `ADJUDICATE=0` | Never sets `adjudication`. |
 
 ## Contributing
 
