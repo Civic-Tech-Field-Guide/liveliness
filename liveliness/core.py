@@ -1145,8 +1145,8 @@ RECENT_LAUNCH_SCORE = 60    # lands in the "Likely Active" band
 # A live homepage is only evidence of current work alongside something dated and
 # recent. A site that loads while the newest signal is over a year old earns the
 # reduced bonus: enough to keep the listing off the dead-site penalty, not enough
-# to carry stale work upward. One listing read 100/Active off a 698-day-old
-# blog post plus a live site, because 55 + 15 lands exactly on the Active line.
+# to carry stale work upward. With the full bonus, a blog post from eighteen
+# months ago plus a live site would score 55 + 15, exactly on the Active line.
 # What a footer copyright naming this year or last is worth. A floor rather than
 # a bonus: added to a score it would stack on top of stale evidence and lift a
 # project whose last real output was years ago into Active, which is the
@@ -1923,9 +1923,9 @@ def render_page_text(url):
 # Some questions do not reduce to a keyword. A conference closes registration
 # because it is about to happen; a consultation closes because it is over. Both
 # write "closed" on the page, and a subject list that tells them apart for one
-# gets the other wrong: a list containing "registration" retired a live
-# conference, and removing it lost a genuinely finished initiative whose page
-# said that its final round of voting had closed.
+# gets the other wrong: a list containing "registration" reads a conference
+# about to happen as finished, and a list without it misses an initiative whose
+# page says only that its final round of voting has closed.
 #
 # Those pages need reading, and reading is a model's job. It does not have to
 # happen while the sweep is running, though, and there are good reasons for it
@@ -1981,9 +1981,9 @@ def adjudication_candidate(name, url, text):
 
 # Only subjects whose closing means the thing itself is over. An intake window
 # shutting says nothing: a healthy conference closes registration precisely
-# because it is about to happen, and one conference was driven from 45 to 10 by its
-# own "Registration is Closed" banner while the site served fine and its footer
-# read 2026. Applications, nominations, entries, submissions, voting and
+# because it is about to happen, and a "Registration is Closed" banner on a
+# live site with a current footer would otherwise cap it at 10. Applications,
+# nominations, entries, submissions, voting and
 # registration all close on schedule every year on programmes that are running,
 # so none of them belongs here.
 _CLOSED_SUBJECTS = (r"questionnaire|survey|consultation|"
