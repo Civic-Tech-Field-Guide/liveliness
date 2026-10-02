@@ -119,6 +119,10 @@ Any date more than a day in the future, or before 2000, is discarded. Commit dat
 
 ## Scoring
 
+![The most points each factor can add: newest dated activity 85, website responding 15, social accounts reachable 10, issues being closed 5. They total 115 and the score is capped at 100.](docs/factors.png)
+
+The chart is drawn by `docs/factors_chart.py`, which reads its numbers from the package.
+
 Every dated signal is turned into points by its age. The best single signal sets the base score. Signals are never added together.
 
 | Age of the date | GitHub, blog, news page | The page's own date | Social post |
