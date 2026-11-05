@@ -29,6 +29,7 @@ import os
 import re
 import socket
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser as _HTMLParser
 from urllib.parse import urljoin, parse_qs, urlparse
@@ -2137,6 +2138,46 @@ def score_to_status(score):
 
 # ── Main computation ──────────────────────────────────────────────────────────
 
+def _parses(url):
+    try:
+        urlparse(url)
+        return True
+    except ValueError:
+        return False
+
+
+def _without_unparseable_urls(project):
+    """
+    The project with every URL that will not parse dropped.
+
+    These come from free-text fields, and urlparse raises on some malformed
+    ones, so a single bad value would otherwise end the score. A dropped URL is
+    treated as never supplied, the same as an empty field.
+    """
+    dropped = []
+    website, repo = project.website, project.repo
+    if website and not _parses(website):
+        dropped.append(website)
+        website = None
+    if repo and not _parses(repo):
+        dropped.append(repo)
+        repo = None
+    feeds = []
+    for f in project.feeds:
+        (feeds if _parses(f) else dropped).append(f)
+    links = []
+    for item in project.links:
+        if _parses(item.get("url") or ""):
+            links.append(item)
+        else:
+            dropped.append(item.get("url"))
+    for u in dropped:
+        _log(f"    skipped  → unparseable URL {str(u)[:60]}")
+    if not dropped:
+        return project
+    return replace(project, website=website, repo=repo, feeds=feeds, links=links)
+
+
 def score_project(project):
     """
     Runs all signal checks and returns:
@@ -2147,6 +2188,7 @@ def score_project(project):
     _PAGE_CACHE.clear()
 
     _log(f"\n  [{name}]")
+    project = _without_unparseable_urls(project)
 
     # ── Website ──────────────────────────────────────────────────────────────
     raw_url = project.website
@@ -2158,6 +2200,9 @@ def score_project(project):
         else:
             _log(f"    website  → DDG URL could not be resolved, skipping")
             raw_url = None
+    if raw_url and not _parses(raw_url):
+        _log(f"    website  → resolved URL does not parse, skipping")
+        raw_url = None
     url_class  = classify_url(raw_url)
     website_url = raw_url
     discovered_url = None

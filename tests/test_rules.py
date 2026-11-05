@@ -163,3 +163,19 @@ def test_a_malformed_or_bare_link_does_not_cost_the_page_its_social_links(monkey
             '<a href="https://bsky.app/profile/example">Bluesky</a>')
     monkeypatch.setattr(core, "get_page_cached", lambda u: (home, {}))
     assert core.discover_social_links("https://x.org/") == ["https://bsky.app/profile/example"]
+
+
+def test_unparseable_supplied_urls_are_dropped_before_scoring():
+    from liveliness import core
+    p = Project(
+        name="x",
+        website="https://example.org]/",
+        repo="https://[github.com/x",
+        feeds=["https://[blog.example/feed", "https://x.org/feed"],
+        links=[{"url": "https://[broken/"}, {"url": "https://bsky.app/profile/x"}],
+    )
+    clean = core._without_unparseable_urls(p)
+    assert clean.website is None and clean.repo is None
+    assert clean.feeds == ["https://x.org/feed"]
+    assert clean.links == [{"url": "https://bsky.app/profile/x"}]
+    assert core._without_unparseable_urls(clean) is clean
