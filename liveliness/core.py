@@ -2161,10 +2161,12 @@ def _without_unparseable_urls(project):
         dropped.append(repo)
         repo = None
     feeds = []
-    for f in project.feeds or []:
+    for f in filter(None, project.feeds or []):
         (feeds if _parses(f) else dropped).append(f)
     links = []
     for item in project.links or []:
+        if not isinstance(item, dict):
+            item = {"url": item}
         if item.get("url") and _parses(item["url"]):
             links.append(item)
         elif item.get("url"):
@@ -2202,7 +2204,6 @@ def score_project(project):
     if raw_url and not _parses(raw_url):
         _log(f"    website  → resolved URL does not parse, skipping")
         raw_url = None
-        website_unreadable = True
     url_class  = classify_url(raw_url)
     website_url = raw_url
     discovered_url = None
