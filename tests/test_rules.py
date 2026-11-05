@@ -197,5 +197,8 @@ def test_score_project_survives_malformed_and_missing_urls(monkeypatch):
     from liveliness import core
     _offline(monkeypatch)
     p = Project(name="x", website="https://example.org]/", repo="https://[github.com/x",
-                feeds=None, links=[{"url": "https://[broken/"}, {"type": "twitter"}, {"url": None}])
-    assert core.score_project(p)["activity_status"] == "Unknown"
+                feeds=None, links=[{"url": "https://[broken/"}, {"type": "twitter"}, {"url": None},
+                                   {"url": ["https://x.org"]}])
+    result = core.score_project(p)
+    assert result["activity_status"] == "Unknown"
+    assert "malformed" in result["breakdown"]

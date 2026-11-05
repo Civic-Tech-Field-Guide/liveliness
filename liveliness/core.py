@@ -208,6 +208,8 @@ def _netloc(url):
     urlparse raises on some malformed ones (an unclosed "[" reads as a broken
     IPv6 host). Callers skip a None so one bad link costs only that link.
     """
+    if not isinstance(url, str):
+        return None
     try:
         return urlparse(url).netloc.lower()
     except ValueError:
@@ -2165,8 +2167,10 @@ def _without_unparseable_urls(project):
     for item in project.links or []:
         if item.get("url") and _parses(item["url"]):
             links.append(item)
+        elif item.get("url"):
+            dropped.append(item["url"])
         else:
-            dropped.append(item.get("url"))
+            _log("    skipped  → a supplied link with no URL")
     for u in dropped:
         _log(f"    skipped  → unparseable URL {str(u)[:60]}")
     return replace(project, website=website, repo=repo, feeds=feeds, links=links)
@@ -2182,6 +2186,7 @@ def score_project(project):
     _PAGE_CACHE.clear()
 
     _log(f"\n  [{name}]")
+    website_unreadable = bool(project.website) and not _parses(project.website)
     project = _without_unparseable_urls(project)
 
     # ── Website ──────────────────────────────────────────────────────────────
@@ -2197,6 +2202,7 @@ def score_project(project):
     if raw_url and not _parses(raw_url):
         _log(f"    website  → resolved URL does not parse, skipping")
         raw_url = None
+        website_unreadable = True
     url_class  = classify_url(raw_url)
     website_url = raw_url
     discovered_url = None
@@ -2468,6 +2474,8 @@ def score_project(project):
     elif url_class == "article":
         why.append("The listed address is an article about the project rather than the "
                    "project itself, and no homepage could be found from it")
+    elif website_unreadable:
+        why.append("The website address on this listing is malformed, so it could not be checked")
     elif not raw_url:
         why.append("No website address on this listing to check")
     elif url_class == "skip":
@@ -2673,6 +2681,10 @@ def score_project(project):
     elif no_signals and is_archived:
         why = ["The address on this listing is an archive snapshot, and the original "
                "could not be reached to see whether the project is still there."]
+    elif no_signals and website_unreadable:
+        why = ["The website address on this listing is malformed, so it could not be "
+               "checked, and there is no code repository, feed or reachable social "
+               "account to go on instead."]
     elif no_signals:
         why = ["Nothing on this listing could be checked: no working website address, "
                "no code repository, no feed and no reachable social accounts."]
