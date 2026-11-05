@@ -29,6 +29,7 @@ import os
 import re
 import socket
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser as _HTMLParser
 from urllib.parse import urljoin, parse_qs, urlparse
@@ -200,6 +201,21 @@ def classify_url(url):
 
 from html.parser import HTMLParser as _HTMLParser
 
+def _netloc(url):
+    """The host part of a URL, or None when the URL will not parse.
+
+    Links come from other people's pages and from free-text fields, and
+    urlparse raises on some malformed ones (an unclosed "[" reads as a broken
+    IPv6 host). Callers skip a None so one bad link costs only that link.
+    """
+    if not isinstance(url, str):
+        return None
+    try:
+        return urlparse(url).netloc.lower()
+    except ValueError:
+        return None
+
+
 class _LinkExtractor(_HTMLParser):
     def __init__(self):
         super().__init__()
@@ -209,7 +225,8 @@ class _LinkExtractor(_HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag == "a":
             attrs_dict = dict(attrs)
-            self._current_anchor = attrs_dict.get("href", "")
+            # A bare <a href> gives None, which the link loops cannot use.
+            self._current_anchor = attrs_dict.get("href") or ""
 
     def handle_data(self, data):
         if self._current_anchor is not None:
@@ -246,7 +263,10 @@ def find_homepage_in_article(article_url):
         for href, text in parser.links:
             if not href.startswith("http"):
                 continue
-            parsed_link = urlparse(href)
+            try:
+                parsed_link = urlparse(href)
+            except ValueError:
+                continue
             link_domain = parsed_link.netloc.lower().lstrip("www.")
 
             # Must be a different domain from the article
@@ -935,7 +955,10 @@ def discover_social_links(website_url):
         for href, _ in parser.links:
             if not href.startswith("http"):
                 continue
-            netloc = urlparse(href).netloc.lower().lstrip("www.")
+            netloc = _netloc(href)
+            if netloc is None:
+                continue
+            netloc = netloc.lstrip("www.")
             if netloc in _SOCIAL_DOMAINS and netloc not in found:
                 found[netloc] = href
         return list(found.values())
@@ -1678,8 +1701,13 @@ def find_news_pages(html, base_url, limit=NEWS_PAGES_MAX):
     for href, text in parser.links:
         if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
             continue
-        url = urljoin(base_url, href).split("#")[0]
-        parsed = urlparse(url)
+        # A malformed href (an unclosed "[" reads as a broken IPv6 host) makes
+        # urljoin raise. One bad link on a page is skipped, not the page.
+        try:
+            url = urljoin(base_url, href).split("#")[0]
+            parsed = urlparse(url)
+        except ValueError:
+            continue
         if parsed.scheme not in ("http", "https"):
             continue
         if parsed.netloc.lower().removeprefix("www.") != host:
@@ -2112,6 +2140,44 @@ def score_to_status(score):
 
 # ── Main computation ──────────────────────────────────────────────────────────
 
+def _parses(url):
+    return _netloc(url) is not None
+
+
+def _without_unparseable_urls(project):
+    """
+    The project with every URL that will not parse dropped.
+
+    These come from free-text fields, and urlparse raises on some malformed
+    ones, so a single bad value would otherwise end the score. A dropped URL is
+    treated as never supplied, the same as an empty field.
+    """
+    dropped = []
+    website, repo = project.website, project.repo
+    if website and not _parses(website):
+        dropped.append(website)
+        website = None
+    if repo and not _parses(repo):
+        dropped.append(repo)
+        repo = None
+    feeds = []
+    for f in filter(None, project.feeds or []):
+        (feeds if _parses(f) else dropped).append(f)
+    links = []
+    for item in project.links or []:
+        if not isinstance(item, dict):
+            item = {"url": item}
+        if item.get("url") and _parses(item["url"]):
+            links.append(item)
+        elif item.get("url"):
+            dropped.append(item["url"])
+        else:
+            _log("    skipped  → a supplied link with no URL")
+    for u in dropped:
+        _log(f"    skipped  → unparseable URL {str(u)[:60]}")
+    return replace(project, website=website, repo=repo, feeds=feeds, links=links)
+
+
 def score_project(project):
     """
     Runs all signal checks and returns:
@@ -2122,6 +2188,8 @@ def score_project(project):
     _PAGE_CACHE.clear()
 
     _log(f"\n  [{name}]")
+    website_unreadable = bool(project.website) and not _parses(project.website)
+    project = _without_unparseable_urls(project)
 
     # ── Website ──────────────────────────────────────────────────────────────
     raw_url = project.website
@@ -2133,6 +2201,9 @@ def score_project(project):
         else:
             _log(f"    website  → DDG URL could not be resolved, skipping")
             raw_url = None
+    if raw_url and not _parses(raw_url):
+        _log(f"    website  → resolved URL does not parse, skipping")
+        raw_url = None
     url_class  = classify_url(raw_url)
     website_url = raw_url
     discovered_url = None
@@ -2197,10 +2268,10 @@ def score_project(project):
     if website_url and url_class == "homepage":
         discovered_social = discover_social_links(website_url)
         if discovered_social:
-            existing_domains = {urlparse(u).netloc.lower().lstrip("www.") for u in all_social_urls}
+            existing_domains = {(_netloc(u) or "").lstrip("www.") for u in all_social_urls}
             added = []
             for su in discovered_social:
-                domain = urlparse(su).netloc.lower().lstrip("www.")
+                domain = (_netloc(su) or "").lstrip("www.")
                 if domain not in existing_domains:
                     all_social_urls.append(su)
                     existing_domains.add(domain)
@@ -2404,6 +2475,8 @@ def score_project(project):
     elif url_class == "article":
         why.append("The listed address is an article about the project rather than the "
                    "project itself, and no homepage could be found from it")
+    elif website_unreadable:
+        why.append("The website address on this listing is malformed, so it could not be checked")
     elif not raw_url:
         why.append("No website address on this listing to check")
     elif url_class == "skip":
@@ -2609,6 +2682,10 @@ def score_project(project):
     elif no_signals and is_archived:
         why = ["The address on this listing is an archive snapshot, and the original "
                "could not be reached to see whether the project is still there."]
+    elif no_signals and website_unreadable:
+        why = ["The website address on this listing is malformed, so it could not be "
+               "checked, and there is no code repository, feed or reachable social "
+               "account to go on instead."]
     elif no_signals:
         why = ["Nothing on this listing could be checked: no working website address, "
                "no code repository, no feed and no reachable social accounts."]

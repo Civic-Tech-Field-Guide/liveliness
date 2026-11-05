@@ -149,3 +149,56 @@ def test_an_unsettled_host_is_not_ruled_dead(monkeypatch):
     monkeypatch.setattr(core, "check_website", lambda u: (False, False, None))
     monkeypatch.setattr(core, "host_resolves", lambda u: None)
     assert core.probe_site("https://x.example/") == (None, False, "unknown")
+
+
+def test_a_malformed_link_is_skipped_not_fatal():
+    from liveliness import core
+    home = '<a href="https://[broken/news/">News</a><a href="/news/">News</a>'
+    assert core.find_news_pages(home, "https://x.org/") == ["https://x.org/news/"]
+
+
+def test_a_malformed_or_bare_link_does_not_cost_the_page_its_social_links(monkeypatch):
+    from liveliness import core
+    home = ('<a href>Menu</a><a href="https://[broken/">x</a>'
+            '<a href="https://bsky.app/profile/example">Bluesky</a>')
+    monkeypatch.setattr(core, "get_page_cached", lambda u: (home, {}))
+    assert core.discover_social_links("https://x.org/") == ["https://bsky.app/profile/example"]
+
+
+def test_unparseable_supplied_urls_are_dropped_before_scoring():
+    from liveliness import core
+    p = Project(
+        name="x",
+        website="https://example.org]/",
+        repo="https://[github.com/x",
+        feeds=["https://[blog.example/feed", "https://x.org/feed"],
+        links=[{"url": "https://[broken/"}, {"url": "https://bsky.app/profile/x"}],
+    )
+    clean = core._without_unparseable_urls(p)
+    assert clean.website is None and clean.repo is None
+    assert clean.feeds == ["https://x.org/feed"]
+    assert clean.links == [{"url": "https://bsky.app/profile/x"}]
+    assert core._without_unparseable_urls(clean) == clean
+
+
+def _offline(monkeypatch):
+    import requests, socket
+    def boom(*a, **k):
+        raise requests.ConnectionError("offline")
+    monkeypatch.setattr(requests.Session, "request", boom)
+    monkeypatch.setattr(requests, "get", boom)
+    monkeypatch.setattr(requests, "head", boom)
+    def no_dns(*a, **k):
+        raise socket.gaierror("offline")
+    monkeypatch.setattr(socket, "getaddrinfo", no_dns)
+
+
+def test_score_project_survives_malformed_and_missing_urls(monkeypatch):
+    from liveliness import core
+    _offline(monkeypatch)
+    p = Project(name="x", website="https://example.org]/", repo="https://[github.com/x",
+                feeds=None, links=[{"url": "https://[broken/"}, {"type": "twitter"}, {"url": None},
+                                   {"url": ["https://x.org"]}, "https://[bare/", None])
+    result = core.score_project(p)
+    assert result["activity_status"] == "Unknown"
+    assert "malformed" in result["breakdown"]
