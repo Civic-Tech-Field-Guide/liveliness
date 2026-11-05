@@ -202,3 +202,9 @@ def test_score_project_survives_malformed_and_missing_urls(monkeypatch):
     result = core.score_project(p)
     assert result["activity_status"] == "Unknown"
     assert "malformed" in result["breakdown"]
+
+
+def test_only_a_leading_www_is_removed_from_a_domain():
+    from liveliness import core
+    assert core.classify_url("https://wired.com/story/x") == "article"
+    assert core.classify_url("https://www.washingtonpost.com/a") == "article"

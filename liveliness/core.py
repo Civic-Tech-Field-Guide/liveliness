@@ -186,7 +186,7 @@ def classify_url(url):
     if not url:
         return "skip"
     parsed = urlparse(url)
-    netloc = parsed.netloc.lower().lstrip("www.")
+    netloc = parsed.netloc.lower().removeprefix("www.")
 
     if netloc in _SKIP_DOMAINS:
         return "skip"
@@ -255,7 +255,7 @@ def find_homepage_in_article(article_url):
         if r.status_code != 200:
             return None
 
-        article_domain = urlparse(article_url).netloc.lower().lstrip("www.")
+        article_domain = urlparse(article_url).netloc.lower().removeprefix("www.")
         parser = _LinkExtractor()
         parser.feed(r.text)
 
@@ -267,7 +267,7 @@ def find_homepage_in_article(article_url):
                 parsed_link = urlparse(href)
             except ValueError:
                 continue
-            link_domain = parsed_link.netloc.lower().lstrip("www.")
+            link_domain = parsed_link.netloc.lower().removeprefix("www.")
 
             # Must be a different domain from the article
             if link_domain == article_domain:
@@ -958,7 +958,7 @@ def discover_social_links(website_url):
             netloc = _netloc(href)
             if netloc is None:
                 continue
-            netloc = netloc.lstrip("www.")
+            netloc = netloc.removeprefix("www.")
             if netloc in _SOCIAL_DOMAINS and netloc not in found:
                 found[netloc] = href
         return list(found.values())
@@ -1117,7 +1117,7 @@ def check_social_recency(url):
         return None, None
 
     parsed = urlparse(url)
-    netloc = parsed.netloc.lower().lstrip("www.")
+    netloc = parsed.netloc.lower().removeprefix("www.")
 
     if "youtube.com" in netloc or "youtu.be" in netloc:
         return _check_youtube(parsed), "YouTube"
@@ -2268,10 +2268,10 @@ def score_project(project):
     if website_url and url_class == "homepage":
         discovered_social = discover_social_links(website_url)
         if discovered_social:
-            existing_domains = {(_netloc(u) or "").lstrip("www.") for u in all_social_urls}
+            existing_domains = {(_netloc(u) or "").removeprefix("www.") for u in all_social_urls}
             added = []
             for su in discovered_social:
-                domain = (_netloc(su) or "").lstrip("www.")
+                domain = (_netloc(su) or "").removeprefix("www.")
                 if domain not in existing_domains:
                     all_social_urls.append(su)
                     existing_domains.add(domain)
