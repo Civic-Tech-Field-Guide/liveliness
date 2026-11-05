@@ -178,4 +178,24 @@ def test_unparseable_supplied_urls_are_dropped_before_scoring():
     assert clean.website is None and clean.repo is None
     assert clean.feeds == ["https://x.org/feed"]
     assert clean.links == [{"url": "https://bsky.app/profile/x"}]
-    assert core._without_unparseable_urls(clean) is clean
+    assert core._without_unparseable_urls(clean) == clean
+
+
+def _offline(monkeypatch):
+    import requests, socket
+    def boom(*a, **k):
+        raise requests.ConnectionError("offline")
+    monkeypatch.setattr(requests.Session, "request", boom)
+    monkeypatch.setattr(requests, "get", boom)
+    monkeypatch.setattr(requests, "head", boom)
+    def no_dns(*a, **k):
+        raise socket.gaierror("offline")
+    monkeypatch.setattr(socket, "getaddrinfo", no_dns)
+
+
+def test_score_project_survives_malformed_and_missing_urls(monkeypatch):
+    from liveliness import core
+    _offline(monkeypatch)
+    p = Project(name="x", website="https://example.org]/", repo="https://[github.com/x",
+                feeds=None, links=[{"url": "https://[broken/"}, {"type": "twitter"}, {"url": None}])
+    assert core.score_project(p)["activity_status"] == "Unknown"

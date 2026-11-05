@@ -2139,11 +2139,7 @@ def score_to_status(score):
 # ── Main computation ──────────────────────────────────────────────────────────
 
 def _parses(url):
-    try:
-        urlparse(url)
-        return True
-    except ValueError:
-        return False
+    return _netloc(url) is not None
 
 
 def _without_unparseable_urls(project):
@@ -2163,18 +2159,16 @@ def _without_unparseable_urls(project):
         dropped.append(repo)
         repo = None
     feeds = []
-    for f in project.feeds:
+    for f in project.feeds or []:
         (feeds if _parses(f) else dropped).append(f)
     links = []
-    for item in project.links:
-        if _parses(item.get("url") or ""):
+    for item in project.links or []:
+        if item.get("url") and _parses(item["url"]):
             links.append(item)
         else:
             dropped.append(item.get("url"))
     for u in dropped:
         _log(f"    skipped  → unparseable URL {str(u)[:60]}")
-    if not dropped:
-        return project
     return replace(project, website=website, repo=repo, feeds=feeds, links=links)
 
 
