@@ -149,3 +149,9 @@ def test_an_unsettled_host_is_not_ruled_dead(monkeypatch):
     monkeypatch.setattr(core, "check_website", lambda u: (False, False, None))
     monkeypatch.setattr(core, "host_resolves", lambda u: None)
     assert core.probe_site("https://x.example/") == (None, False, "unknown")
+
+
+def test_a_malformed_link_is_skipped_not_fatal():
+    from liveliness import core
+    home = '<a href="https://[broken/news/">News</a><a href="/news/">News</a>'
+    assert core.find_news_pages(home, "https://x.org/") == ["https://x.org/news/"]

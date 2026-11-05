@@ -1678,8 +1678,13 @@ def find_news_pages(html, base_url, limit=NEWS_PAGES_MAX):
     for href, text in parser.links:
         if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
             continue
-        url = urljoin(base_url, href).split("#")[0]
-        parsed = urlparse(url)
+        # A malformed href (an unclosed "[" reads as a broken IPv6 host) makes
+        # urljoin raise. One bad link on a page is skipped, not the page.
+        try:
+            url = urljoin(base_url, href).split("#")[0]
+            parsed = urlparse(url)
+        except ValueError:
+            continue
         if parsed.scheme not in ("http", "https"):
             continue
         if parsed.netloc.lower().removeprefix("www.") != host:
