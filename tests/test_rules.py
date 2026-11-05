@@ -155,3 +155,11 @@ def test_a_malformed_link_is_skipped_not_fatal():
     from liveliness import core
     home = '<a href="https://[broken/news/">News</a><a href="/news/">News</a>'
     assert core.find_news_pages(home, "https://x.org/") == ["https://x.org/news/"]
+
+
+def test_a_malformed_or_bare_link_does_not_cost_the_page_its_social_links(monkeypatch):
+    from liveliness import core
+    home = ('<a href>Menu</a><a href="https://[broken/">x</a>'
+            '<a href="https://bsky.app/profile/example">Bluesky</a>')
+    monkeypatch.setattr(core, "get_page_cached", lambda u: (home, {}))
+    assert core.discover_social_links("https://x.org/") == ["https://bsky.app/profile/example"]

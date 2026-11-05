@@ -200,6 +200,19 @@ def classify_url(url):
 
 from html.parser import HTMLParser as _HTMLParser
 
+def _netloc(url):
+    """The host part of a URL, or None when the URL will not parse.
+
+    Links come from other people's pages and from free-text fields, and
+    urlparse raises on some malformed ones (an unclosed "[" reads as a broken
+    IPv6 host). Callers skip a None so one bad link costs only that link.
+    """
+    try:
+        return urlparse(url).netloc.lower()
+    except ValueError:
+        return None
+
+
 class _LinkExtractor(_HTMLParser):
     def __init__(self):
         super().__init__()
@@ -209,7 +222,8 @@ class _LinkExtractor(_HTMLParser):
     def handle_starttag(self, tag, attrs):
         if tag == "a":
             attrs_dict = dict(attrs)
-            self._current_anchor = attrs_dict.get("href", "")
+            # A bare <a href> gives None, which the link loops cannot use.
+            self._current_anchor = attrs_dict.get("href") or ""
 
     def handle_data(self, data):
         if self._current_anchor is not None:
@@ -246,7 +260,10 @@ def find_homepage_in_article(article_url):
         for href, text in parser.links:
             if not href.startswith("http"):
                 continue
-            parsed_link = urlparse(href)
+            try:
+                parsed_link = urlparse(href)
+            except ValueError:
+                continue
             link_domain = parsed_link.netloc.lower().lstrip("www.")
 
             # Must be a different domain from the article
@@ -935,7 +952,10 @@ def discover_social_links(website_url):
         for href, _ in parser.links:
             if not href.startswith("http"):
                 continue
-            netloc = urlparse(href).netloc.lower().lstrip("www.")
+            netloc = _netloc(href)
+            if netloc is None:
+                continue
+            netloc = netloc.lstrip("www.")
             if netloc in _SOCIAL_DOMAINS and netloc not in found:
                 found[netloc] = href
         return list(found.values())
@@ -2202,10 +2222,10 @@ def score_project(project):
     if website_url and url_class == "homepage":
         discovered_social = discover_social_links(website_url)
         if discovered_social:
-            existing_domains = {urlparse(u).netloc.lower().lstrip("www.") for u in all_social_urls}
+            existing_domains = {(_netloc(u) or "").lstrip("www.") for u in all_social_urls}
             added = []
             for su in discovered_social:
-                domain = urlparse(su).netloc.lower().lstrip("www.")
+                domain = (_netloc(su) or "").lstrip("www.")
                 if domain not in existing_domains:
                     all_social_urls.append(su)
                     existing_domains.add(domain)
