@@ -29,6 +29,7 @@ import os
 import re
 import socket
 import time
+import zlib
 from collections import Counter
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -1791,6 +1792,13 @@ SITEMAP_DEADLINE_S      = 25    # wall clock for the whole search
 SITEMAP_TIMEOUT_S       = 8
 SITEMAP_STAMP_MIN_COUNT = 5     # entries that must share a stamp to call it a build
 SITEMAP_LABEL           = "Newest change listed in the site's sitemap"
+# The sitemap may lift a listing out of Unknown and never push one down. A
+# lastmod up to eighteen months old scores 40 as the site's own date, and the 5
+# a responding site earns brings that to 45, the foot of Likely Active. Older
+# dates would land a live site in Possibly Inactive or Inactive on the strength
+# of a file most visitors never see, so they count for nothing and the archive
+# is asked instead.
+SITEMAP_MAX_AGE_DAYS    = 548
 
 _SITEMAP_ENTRY_RE = re.compile(r"<(?:\w+:)?(url|sitemap)\b[^>]*>([\s\S]*?)</(?:\w+:)?\1\s*>", re.I)
 # The image, video and news extensions put a <loc> of their own inside an
@@ -1810,7 +1818,6 @@ def _gunzip_prefix(body):
     cut short. The entries in the part that did arrive are still good, and a
     small file that unpacks to something huge is cut off rather than held.
     """
-    import zlib
     try:
         return zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(body, SITEMAP_MAX_TEXT_BYTES)
     except zlib.error:
@@ -1883,12 +1890,10 @@ def _site_host(url):
 def _same_site(loc, hosts):
     """
     True when a sitemap entry is on the listed site. `hosts` is the listed host
-    and any host the site redirected to, or a single host, or empty for any.
+    and any host the site redirected to, or empty for any.
     """
     if not hosts:
         return True
-    if isinstance(hosts, str):
-        hosts = {hosts}
     return _site_host(loc) in hosts
 
 
@@ -1912,8 +1917,11 @@ def sitemap_newest_date(entries, now, prefix="", hosts=None):
             continue
         dt = _parse_date_loose(mod, now)
         if dt is not None:
-            dated.append(dt)
             raws.append(mod)
+            # The server's clock, not a change: dropped before anything else
+            # is judged, so one such entry cannot make a real build look old.
+            if (now - dt).days >= LAST_MODIFIED_MIN_AGE_DAYS:
+                dated.append(dt)
     # Pages edited by hand do not share a timestamp to the second. A sitemap
     # whose every entry does was written in one pass by a generator. Below five
     # entries one sitting of edits can look the same, so it is believed.
@@ -1928,8 +1936,7 @@ def sitemap_newest_date(entries, now, prefix="", hosts=None):
         if (count >= SITEMAP_BUILD_SHARE * len(dated)
                 and day < max(d.date() for d in dated)):
             dated = [d for d in dated if d.date() != day]
-    fresh = [d for d in dated if (now - d).days >= LAST_MODIFIED_MIN_AGE_DAYS]
-    return max(fresh, default=None)
+    return max(dated, default=None)
 
 
 def _robots_sitemaps(root, deadline):
@@ -1997,6 +2004,8 @@ def sitemap_date(url, now):
             entries = [(urljoin(src, loc), mod) for loc, mod in entries]
             if kind == "urlset":
                 dt = sitemap_newest_date(entries, now, prefix, hosts)
+                if dt and (now - dt).days > SITEMAP_MAX_AGE_DAYS:
+                    dt = None
                 if dt and (best is None or dt > best[0]):
                     best = (dt, src)
                 continue
@@ -2035,10 +2044,12 @@ def sitemap_date(url, now):
 
 WAYBACK_CDX           = "https://web.archive.org/cdx/search/cdx"
 WAYBACK_TIMEOUT_S     = 10
-WAYBACK_WINDOW        = 20      # recent captures read to judge churn
+WAYBACK_WINDOW        = 20      # recent real captures read to judge churn
+WAYBACK_FETCH_ROWS    = 40      # asked for, so bot checks can be dropped first
+WAYBACK_MIN_CAPTURES  = 6       # real captures needed before the hashes mean anything
+WAYBACK_TIMEOUTS_TO_PAUSE = 2
 WAYBACK_MAX_CHURN     = 0.5     # share of captures with a new hash that means churn
 WAYBACK_MIN_LENGTH    = 1500    # bytes; smaller captures are bot checks and stubs
-WAYBACK_RECENT_CAPTURE_DAYS = 365
 WAYBACK_RECENT_CHANGE_DAYS  = 365
 WAYBACK_MIN_INTERVAL_S = 4
 WAYBACK_PAUSE_S       = 600
@@ -2046,11 +2057,12 @@ WAYBACK_LABEL         = "Last content change seen by the Wayback Machine"
 
 _wayback_last_call   = 0.0
 _wayback_paused_till = 0.0
+_wayback_timeouts    = 0
 
 
 def _cdx(params):
     """Rows from the CDX API, or None when the archive could not be asked."""
-    global _wayback_last_call, _wayback_paused_till
+    global _wayback_last_call, _wayback_paused_till, _wayback_timeouts
     now = time.monotonic()
     if now < _wayback_paused_till:
         return None
@@ -2062,9 +2074,17 @@ def _cdx(params):
         r = SESSION.get(WAYBACK_CDX, params=dict(params, output="json"),
                         timeout=WAYBACK_TIMEOUT_S)
     except Exception:
-        _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
-        _log("    wayback  → no answer; not asked again for a while")
+        # One slow answer is the archive being slow. Two in a row is the
+        # archive struggling, and every later record would wait on it too.
+        _wayback_timeouts += 1
+        if _wayback_timeouts >= WAYBACK_TIMEOUTS_TO_PAUSE:
+            _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
+            _wayback_timeouts = 0
+            _log("    wayback  → no answer twice; not asked again for a while")
+        else:
+            _log("    wayback  → no answer")
         return None
+    _wayback_timeouts = 0
     if r.status_code == 429 or r.status_code >= 500:
         _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
         _log(f"    wayback  → refused ({r.status_code}); not asked again for a while")
@@ -2090,7 +2110,7 @@ def wayback_change_from_captures(rows):
     The first capture of the newest content, from (timestamp, digest) rows in
     time order, as (datetime | None, settled). settled is False when the newest
     content already held at the start of the rows, so its first capture is
-    earlier than anything here and has to be looked up.
+    earlier than anything here, and the rows can only bound it.
 
     None for the date when the rows cannot date a change: too few of them, or
     a page whose hash changes on most captures.
@@ -2135,15 +2155,12 @@ def wayback_change_date(url, now=None):
         return None
     target = p.netloc + (p.path or "/")
     base = {"url": target, "fl": "timestamp,digest,length", "filter": "statuscode:200"}
-    rows = _cdx(dict(base, limit=-WAYBACK_WINDOW))
+    rows = _cdx(dict(base, limit=-WAYBACK_FETCH_ROWS, fastLatest="true"))
     if not rows:
         return None
-    rows = sorted((r for r in rows if _real_capture(r)), key=lambda r: r[0])
-    # An archive that stopped capturing the page cannot say whether it has
-    # changed since, so an old last capture dates nothing.
-    newest = _cdx_time(rows[-1][0]) if rows else None
-    if newest is None or (now - newest).days > WAYBACK_RECENT_CAPTURE_DAYS:
-        _log("    wayback  → no recent capture of the page")
+    rows = sorted((r for r in rows if _real_capture(r)), key=lambda r: r[0])[-WAYBACK_WINDOW:]
+    if len(rows) < WAYBACK_MIN_CAPTURES:
+        _log("    wayback  → too few captures of the page to judge")
         return None
     dt, settled = wayback_change_from_captures(rows)
     if dt is None:
@@ -2740,6 +2757,7 @@ def score_project(project):
     # It is deliberately not extended to a timeout or a connection error, where
     # there is nothing to render and the wait would be paid twice.
     blocked_text = None
+    js_shell = False
     if website_url and site_verdict == "blocked" and not is_archived:
         _log(f"    website  → behind a bot check; trying a browser")
         candidate = render_page_text(website_url)
@@ -2769,6 +2787,7 @@ def score_project(project):
             # as its own fact rather than left to look like an absence.
             readable = blocked_text or readable_page(page_html)["text"]
             page_unreadable = len(readable) < MIN_READABLE_PAGE_CHARS
+            js_shell = page_unreadable and blocked_text is None
 
             # A shell is worth a second look through a browser, where the words
             # actually exist. Only a shell: the nine in ten pages that already
@@ -2821,8 +2840,9 @@ def score_project(project):
     # Behind a wall only the archive is asked, since the wall that refused the
     # homepage refuses the sitemap too.
     project_site = url_class == "homepage" or (url_class == "article" and discovered_url)
-    if (not candidates and website_url and project_site and not page_closed
-            and not is_archived and site_verdict in ("ok", "blocked")):
+    # A stale social post scores 0 and is no reason to stop looking.
+    if (not any(c[0] > 0 for c in candidates) and website_url and project_site
+            and not page_closed and not is_archived and site_verdict in ("ok", "blocked")):
         found = None
         if website_alive is True and site_verdict == "ok":
             found = sitemap_date(website_url, now)
@@ -2833,7 +2853,9 @@ def score_project(project):
                 _log(f"    sitemap  → nothing dated and believable")
         fresh_footer = (page_copyright_year is not None
                         and page_copyright_year >= now.year - 1)
-        if not found and not fresh_footer:
+        # A page built by script changes its bundle's name on every deploy, so
+        # the archive sees a new hash whether or not anything on it changed.
+        if not found and not fresh_footer and not js_shell:
             changed = wayback_change_date(website_url, now)
             if changed:
                 candidates.append((wayback_recency_score(changed, now), changed, WAYBACK_LABEL))

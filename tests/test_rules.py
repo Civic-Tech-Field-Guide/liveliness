@@ -329,9 +329,9 @@ def test_a_sitemap_with_nothing_usable_does_not_end_the_search(monkeypatch):
         "https://news.example/sitemap.xml":
             '<urlset><url><loc>https://news.example/a</loc><lastmod>2026-11-01</lastmod></url></urlset>',
         "https://x.org/sitemap.xml":
-            '<urlset><url><loc>https://x.org/</loc><lastmod>2025-04-01</lastmod></url></urlset>'})
+            '<urlset><url><loc>https://x.org/</loc><lastmod>2025-08-01</lastmod></url></urlset>'})
     dt, src = core.sitemap_date("https://x.org/", _now())
-    assert (dt.year, dt.month) == (2025, 4) and src == "https://x.org/sitemap.xml"
+    assert (dt.year, dt.month) == (2025, 8) and src == "https://x.org/sitemap.xml"
 
 
 def test_a_site_that_redirects_is_dated_by_the_host_it_lands_on(monkeypatch):
@@ -431,7 +431,7 @@ def test_a_page_flipping_between_two_versions_dates_nothing():
     assert core.wayback_change_from_captures(rows) == (None, True)
 
 
-def test_unchanged_across_every_capture_needs_the_older_record():
+def test_unchanged_across_every_capture_is_not_settled():
     from liveliness import core
     rows = [["20260101000000", "A"], ["20260201000000", "A"], ["20260301000000", "A"]]
     dt, settled = core.wayback_change_from_captures(rows)
@@ -463,8 +463,10 @@ def test_an_archive_change_over_a_year_old_dates_nothing(monkeypatch):
 def test_a_recent_archive_change_is_a_date(monkeypatch):
     from liveliness import core
     monkeypatch.setattr(core, "_cdx", lambda params: [
-        ["20260101000000", "A", "9000"], ["20260601000000", "B", "9000"],
-        ["20260801000000", "B", "9000"], ["20260901000000", "B", "9000"]])
+        ["20260101000000", "A", "9000"], ["20260201000000", "A", "9000"],
+        ["20260301000000", "A", "9000"], ["20260601000000", "B", "9000"],
+        ["20260701000000", "B", "9000"], ["20260801000000", "B", "9000"],
+        ["20260901000000", "B", "9000"]])
     assert core.wayback_change_date("https://x.org/", _now()).month == 6
 
 
@@ -503,18 +505,18 @@ def test_getting_past_a_bot_check_is_not_a_content_change(monkeypatch):
 def test_a_sitemap_of_another_site_says_nothing_about_this_one():
     from liveliness import core
     entries = [("https://news.example/story/1", "2026-11-01"), ("https://www.x.org/", "2025-02-01")]
-    dt = core.sitemap_newest_date(entries, _now(), "", "x.org")
+    dt = core.sitemap_newest_date(entries, _now(), "", {"x.org"})
     assert (dt.year, dt.month) == (2025, 2)
-    assert core.sitemap_newest_date(entries[:1], _now(), "", "x.org") is None
+    assert core.sitemap_newest_date(entries[:1], _now(), "", {"x.org"}) is None
 
 
 def test_a_sitemap_that_lists_bare_paths_is_read_as_its_own_site(monkeypatch):
     from liveliness import core
     _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml":
-              '<urlset><url><loc>/orgs/a/</loc><lastmod>2019-12-12T22:57:14+00:00</lastmod>'
+              '<urlset><url><loc>/orgs/a/</loc><lastmod>2026-01-12T22:57:14+00:00</lastmod>'
               '</url></urlset>'})
     dt, _ = core.sitemap_date("https://x.org/", _now())
-    assert dt.year == 2019
+    assert (dt.year, dt.month) == (2026, 1)
 
 
 def test_an_archive_that_cannot_be_asked_is_no_evidence(monkeypatch):
@@ -525,12 +527,15 @@ def test_an_archive_that_cannot_be_asked_is_no_evidence(monkeypatch):
     monkeypatch.setattr(core.SESSION, "get", stall)
     monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
     monkeypatch.setattr(core, "_wayback_last_call", 0.0)
+    monkeypatch.setattr(core, "_wayback_timeouts", 0)
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
     assert core.wayback_change_date("https://x.org/") is None
-    # And a stalled archive is not asked again for every later record.
-    def never(*a, **k):
-        raise AssertionError("asked again while paused")
-    monkeypatch.setattr(core.SESSION, "get", never)
+    assert core.wayback_change_date("https://w.org/") is None
+    # And an archive that stalled twice is not asked again for every later record.
+    asked = []
+    monkeypatch.setattr(core.SESSION, "get", lambda *a, **k: asked.append(1))
     assert core.wayback_change_date("https://y.org/") is None
+    assert asked == []
 
 
 def test_an_archive_change_scores_like_the_footer_copyright():
@@ -688,3 +693,125 @@ def test_a_site_that_dates_itself_is_not_sent_to_the_sitemap(monkeypatch):
     monkeypatch.setattr(core, "sitemap_date", never)
     monkeypatch.setattr(core, "wayback_change_date", never)
     assert core.score_project(Project(name="x", website="https://x.org/"))["score"] is not None
+
+
+
+# ── Third review ──────────────────────────────────────────────────────────────
+
+def test_an_old_sitemap_date_lifts_nothing_and_leaves_room_for_the_archive(monkeypatch):
+    # A 2017 lastmod on a live site would score 3 + 5 = Inactive. The sitemap
+    # may only lift a listing, so a date that old says nothing at all.
+    from liveliness import core
+    _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml":
+              '<urlset><url><loc>https://x.org/</loc><lastmod>2017-03-01</lastmod></url></urlset>'})
+    assert core.sitemap_date("https://x.org/", _now()) is None
+
+
+def test_a_sitemap_date_within_eighteen_months_counts(monkeypatch):
+    from liveliness import core
+    _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml":
+              '<urlset><url><loc>https://x.org/</loc><lastmod>2025-07-01</lastmod></url></urlset>'})
+    assert core.sitemap_date("https://x.org/", _now())[0].year == 2025
+
+
+def test_a_server_clock_entry_does_not_hide_a_recent_build():
+    from liveliness import core
+    entries = [("https://x.org/p/%d" % i, "2026-10-20") for i in range(18)]
+    entries += [("https://x.org/now", "2026-11-10T09:00:00Z"), ("https://x.org/about", "2025-06-01")]
+    dt = core.sitemap_newest_date(entries, _now())
+    assert (dt.year, dt.month, dt.day) == (2026, 10, 20)
+
+
+def test_a_stale_social_post_does_not_keep_the_last_resorts_away(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    monkeypatch.setattr(core, "discover_social_links", lambda u: ["https://bsky.app/profile/x"])
+    monkeypatch.setattr(core, "check_url_alive", lambda u: True)
+    old = datetime.now(timezone.utc) - timedelta(days=900)
+    monkeypatch.setattr(core, "check_social_recency", lambda u: (old, "Bluesky"))
+    asked = []
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now: asked.append(u) or None)
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None: None)
+    core.score_project(Project(name="x", website="https://x.org/"))
+    assert asked == ["https://x.org/"]
+
+
+def test_a_page_built_in_the_browser_is_not_dated_by_the_archive(monkeypatch):
+    # Every redeploy changes the script bundle's name in the shell, so the
+    # archive sees a new hash with nothing on the page having changed.
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    monkeypatch.setattr(core, "get_page_cached",
+                        lambda u: ('<html><body><div id="root"></div>'
+                                   '<script src="/app.3f9c.js"></script></body></html>', {}))
+    monkeypatch.setattr(core, "render_page_text", lambda u: None)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
+    def never(*a, **k):
+        raise AssertionError("a script shell is not dated by the archive")
+    monkeypatch.setattr(core, "wayback_change_date", never)
+    assert core.score_project(Project(name="x", website="https://x.org/"))["activity_status"] == "Unknown"
+
+
+def test_a_shell_rendered_into_words_is_not_dated_by_the_archive_either(monkeypatch):
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    monkeypatch.setattr(core, "get_page_cached",
+                        lambda u: ('<html><body><div id="root"></div></body></html>', {}))
+    monkeypatch.setattr(core, "render_page_text", lambda u: "We help cities listen. " * 30)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
+    def never(*a, **k):
+        raise AssertionError("a script shell is not dated by the archive")
+    monkeypatch.setattr(core, "wayback_change_date", never)
+    core.score_project(Project(name="x", website="https://x.org/"))
+
+
+def test_the_archive_is_asked_for_its_latest_captures_the_fast_way(monkeypatch):
+    from liveliness import core
+    seen = []
+    def cdx(params):
+        seen.append(params)
+        return []
+    monkeypatch.setattr(core, "_cdx", cdx)
+    core.wayback_change_date("https://x.org/", _now())
+    assert seen[0]["fastLatest"] == "true"
+    assert seen[0]["limit"] == -core.WAYBACK_FETCH_ROWS
+    assert core.WAYBACK_FETCH_ROWS > core.WAYBACK_WINDOW
+
+
+def test_small_captures_are_dropped_before_the_window_is_cut(monkeypatch):
+    # Twenty bot-check captures at the end must not crowd out the real page.
+    from liveliness import core
+    real = [["2026%02d01000000" % m, "A" if m < 6 else "B", "9000"] for m in range(1, 10)]
+    walls = [["202610%02d000000" % d, "W%d" % d, "400"] for d in range(1, 21)]
+    monkeypatch.setattr(core, "_cdx", lambda params: real + walls)
+    dt = core.wayback_change_date("https://x.org/", _now())
+    assert (dt.year, dt.month) == (2026, 6)
+
+
+def test_too_few_real_captures_date_nothing(monkeypatch):
+    from liveliness import core
+    rows = [["20260101000000", "A", "9000"], ["20260301000000", "A", "9000"],
+            ["20260601000000", "B", "9000"], ["20260801000000", "B", "9000"]]
+    monkeypatch.setattr(core, "_cdx", lambda params: rows)
+    assert core.wayback_change_date("https://x.org/", _now()) is None
+
+
+def test_one_slow_answer_does_not_pause_the_archive(monkeypatch):
+    import requests
+    from liveliness import core
+    calls = []
+    def slow(*a, **k):
+        calls.append(1)
+        raise requests.Timeout("slow")
+    monkeypatch.setattr(core.SESSION, "get", slow)
+    monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
+    monkeypatch.setattr(core, "_wayback_last_call", 0.0)
+    monkeypatch.setattr(core, "_wayback_timeouts", 0)
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    assert core._cdx({"url": "x.org/"}) is None
+    assert core._wayback_paused_till == 0.0
+    assert core._cdx({"url": "y.org/"}) is None
+    assert core._wayback_paused_till > 0.0
+    assert core._cdx({"url": "z.org/"}) is None
+    assert len(calls) == 2
