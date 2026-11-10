@@ -248,7 +248,8 @@ def test_a_sitemap_with_one_stamp_on_every_entry_is_a_build_not_a_change():
     entries = [("https://x.org/%d" % i, "2026-10-01T08:00:00Z") for i in range(6)]
     assert core.sitemap_newest_date(entries, _now()) is None
     # A handful of pages edited on one day is not enough to call it a build.
-    assert core.sitemap_newest_date(entries[:3], _now()) is not None
+    by_day = [("https://x.org/%d" % i, "2026-10-01") for i in range(3)]
+    assert core.sitemap_newest_date(by_day, _now()) is not None
 
 
 def test_a_listing_deep_in_a_site_is_dated_by_its_own_section():
@@ -364,6 +365,16 @@ def test_a_sitemap_stamp_on_nearly_every_entry_is_a_build(monkeypatch):
     dt = core.sitemap_newest_date(entries, _now())
     assert (dt.year, dt.month, dt.day) == (2025, 9, 5)
     assert core.sitemap_newest_date(entries[:18], _now()) is None
+
+
+def test_a_small_sitemap_stamped_to_the_same_second_is_a_build():
+    from liveliness import core
+    stamp = "2026-11-07T23:00:47+00:00"
+    entries = [("https://x.org/", stamp), ("https://x.org/blog", stamp), ("https://x.org/themes", stamp)]
+    assert core.sitemap_newest_date(entries, _now()) is None
+    # Two pages edited on the same day, dated without a time, are just that.
+    assert core.sitemap_newest_date([("https://x.org/a", "2026-10-05"),
+                                     ("https://x.org/b", "2026-10-05")], _now()) is not None
 
 
 def test_an_image_address_inside_an_entry_is_not_the_entry():

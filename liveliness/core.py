@@ -1905,13 +1905,18 @@ def sitemap_newest_date(entries, now, prefix="", hosts=None):
     that day is the build and is set aside, and the entries left over, usually
     the pages somebody edited by hand, date the site.
     """
-    dated = []
+    dated, raws = [], []
     for loc, mod in entries:
         if not mod or not _same_site(loc, hosts) or not _within(loc, prefix):
             continue
         dt = _parse_date_loose(mod, now)
         if dt is not None:
             dated.append(dt)
+            raws.append(mod)
+    # Pages edited by hand do not share a timestamp to the second. A small
+    # sitemap whose every entry does was written in one pass by a generator.
+    if len(raws) >= 2 and len(set(raws)) == 1 and re.search(r"T\d\d:\d\d:\d\d", raws[0]):
+        return None
     if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
         day, count = Counter(d.date() for d in dated).most_common(1)[0]
         if count >= SITEMAP_BUILD_SHARE * len(dated):
