@@ -111,6 +111,14 @@ The scorer looks for a closure notice in the first 3,000 characters of the page 
 
 About one in ten reachable sites sends an empty shell and builds its text in the browser. A page with fewer than 200 characters of readable text is read again with a headless browser. If it still can't be read, it is recorded as unread, and its footer copyright doesn't count.
 
+### Last resorts
+
+Two more sources are asked only when nothing else dated was found: no code, feed, social post, news page or date on the page. Both cost extra requests, and both are weaker than any of those, so a listing with a dated signal never reaches them. Neither is asked for a site that did not respond, a page that has moved or an archive snapshot, since what they would date is no longer the project.
+
+**Sitemap.** The sitemaps named in the site's `robots.txt` are read first, then `/sitemap.xml`, `/sitemap_index.xml` and `/wp-sitemap.xml`, and the first real sitemap found is the one used. A sitemap index is followed two levels down, reading at most four child sitemaps from each, newest first, with at most eight requests and 25 seconds for the whole search. When the listed address points into a section of a site, only entries at or under that address count, so a lab's page on a university site is dated by the lab's pages rather than by the university's news. The newest `lastmod` counts like a date the page states about itself. Two kinds of `lastmod` are ignored. One from today or yesterday is the server's clock, by the same reasoning as the `Last-Modified` header, since a sitemap built for each request stamps every entry with the time of the request. And when five or more entries all carry one identical stamp, the stamp is the time the sitemap was built rather than the time anything changed.
+
+**Wayback Machine.** The Internet Archive records a hash of every capture it makes, so a change in the hash is a change in the content. The 20 most recent successful captures of the listed address are read, and the first capture of the current content dates the last change the archive saw. When the content has not changed across all 20, one more request finds when it first appeared. Many pages change their hash on every capture, from a rotating banner, a form token or a clock, and for those the last change is only the last capture. So when more than half of the recent captures differ from the one before, or the page flips back to an earlier version, the archive is not used. The archive reaches sites that turn this checker away at a bot check, which is the main reason to ask it. It is weak evidence, scored like the footer copyright, and it never counts toward the bonus for a responding website. The archive limits clients to about 15 requests a minute, so requests are spaced four seconds apart, and an archive that refuses or does not answer within ten seconds is left alone for the next ten minutes and counts as no evidence.
+
 ### Dates
 
 Dates more than a day in the future, or before 2000, are discarded. Publishers set their own commit, feed and post dates, and a wrong clock would otherwise keep a score at the top.
@@ -123,15 +131,15 @@ Dates more than a day in the future, or before 2000, are discarded. Publishers s
 
 Each dated signal gets points by age. The best single signal sets the base score. Signals are not added together.
 
-| Age of the date | GitHub, blog, news page | The page's own date | Social post |
-| --- | --- | --- | --- |
-| 90 days or less | 85 | 70 | 55 |
-| 180 days or less | 80 | 65 | 50 |
-| 1 year or less | 70 | 55 | 45 |
-| 18 months or less | 55 | 40 | 0 |
-| 3 years or less | 35 | 25 | 0 |
-| 5 years or less | 15 | 10 | 0 |
-| Older | 5 | 3 | 0 |
+| Age of the date | GitHub, blog, news page | The page's own date, sitemap | Social post | Wayback Machine change |
+| --- | --- | --- | --- | --- |
+| 90 days or less | 85 | 70 | 55 | 45 |
+| 180 days or less | 80 | 65 | 50 | 45 |
+| 1 year or less | 70 | 55 | 45 | 45 |
+| 18 months or less | 55 | 40 | 0 | 25 |
+| 3 years or less | 35 | 25 | 0 | 15 |
+| 5 years or less | 15 | 10 | 0 | 5 |
+| Older | 5 | 3 | 0 | 3 |
 
 A date the page gives for itself scores lower than a commit, because content systems update `dateModified` when a template changes and hand-written "last updated" lines go stale. It scores higher than a social post because it comes from the project's own site. An archived GitHub repository counts for at most 15.
 
