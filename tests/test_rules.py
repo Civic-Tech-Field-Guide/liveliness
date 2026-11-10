@@ -283,7 +283,7 @@ def _fake_web(monkeypatch, core, pages):
     Anything else answers 404. Returns the list of URLs requested.
     """
     seen = []
-    def get(url, timeout=10, headers=None):
+    def get(url, timeout=10, headers=None, deadline_s=None):
         seen.append(url)
         page = pages.get(url)
         if page is None:
@@ -361,20 +361,44 @@ def test_a_sitemap_stamp_on_nearly_every_entry_is_a_build(monkeypatch):
     # A deploy restamps the generated pages; the few hand-dated ones remain.
     from liveliness import core
     entries = [("https://x.org/p/%d" % i, "2026-08-30T0%d:00:00Z" % (i % 10)) for i in range(18)]
-    entries += [("https://x.org/", "2025-09-05"), ("https://x.org/about", "2025-06-01")]
+    entries += [("https://x.org/", "2026-09-05"), ("https://x.org/about", "2025-06-01")]
     dt = core.sitemap_newest_date(entries, _now())
-    assert (dt.year, dt.month, dt.day) == (2025, 9, 5)
-    assert core.sitemap_newest_date(entries[:18], _now()) is None
+    assert (dt.year, dt.month, dt.day) == (2026, 9, 5)
+    # A build that is the newest thing in the file is a recent deploy, and counts.
+    assert core.sitemap_newest_date(entries[:18], _now()).day == 30
 
 
-def test_a_small_sitemap_stamped_to_the_same_second_is_a_build():
+def test_a_sitemap_stamped_to_the_same_second_is_a_build_once_it_has_five_entries():
     from liveliness import core
     stamp = "2026-11-07T23:00:47+00:00"
-    entries = [("https://x.org/", stamp), ("https://x.org/blog", stamp), ("https://x.org/themes", stamp)]
+    entries = [("https://x.org/%d" % i, stamp) for i in range(5)]
     assert core.sitemap_newest_date(entries, _now()) is None
+    # Three pages are too few to tell a generator from one sitting of edits.
+    assert core.sitemap_newest_date(entries[:3], _now()) is not None
     # Two pages edited on the same day, dated without a time, are just that.
     assert core.sitemap_newest_date([("https://x.org/a", "2026-10-05"),
                                      ("https://x.org/b", "2026-10-05")], _now()) is not None
+
+
+def test_a_build_day_that_is_the_newest_day_still_counts():
+    from liveliness import core
+    entries = [("https://x.org/p/%d" % i, "2026-10-20") for i in range(18)]
+    entries += [("https://x.org/", "2025-09-05"), ("https://x.org/about", "2025-06-01")]
+    dt = core.sitemap_newest_date(entries, _now())
+    assert (dt.year, dt.month, dt.day) == (2026, 10, 20)
+
+
+def test_each_sitemap_fetch_is_held_to_the_time_left(monkeypatch):
+    import time
+    from liveliness import core
+    caps = []
+    def get(url, timeout=10, headers=None, deadline_s=None):
+        caps.append((timeout, deadline_s))
+        return _FakeResponse(url, "<html>not found</html>", 404)
+    monkeypatch.setattr(core, "get_limited", get)
+    core._sitemap_body("https://x.org/sitemap.xml", time.monotonic() + 3)
+    timeout, deadline_s = caps[0]
+    assert timeout <= 3 and deadline_s is not None and deadline_s <= 3
 
 
 def test_an_image_address_inside_an_entry_is_not_the_entry():
@@ -414,20 +438,47 @@ def test_unchanged_across_every_capture_needs_the_older_record():
     assert not settled and dt.month == 1
 
 
-def test_an_unchanged_page_is_dated_by_when_its_content_first_appeared(monkeypatch):
+def test_a_page_unchanged_across_every_capture_dates_nothing(monkeypatch):
+    # The change is somewhere before the window, which is only a bound, and the
+    # archive is never allowed to push a listing down on a bound.
     from liveliness import core
     calls = []
     def cdx(params):
         calls.append(params)
-        if params.get("limit") == 1:
-            assert "digest:A" in params["filter"]
-            return [["20190405000000", "A", "9000"]]
         return [["20260101000000", "A", "9000"], ["20260201000000", "A", "9100"],
                 ["20260301000000", "A", "9050"]]
     monkeypatch.setattr(core, "_cdx", cdx)
-    dt = core.wayback_change_date("https://x.org/", _now())
-    assert (dt.year, dt.month) == (2019, 4) and len(calls) == 2
-    assert calls[0]["url"] == "x.org/"
+    assert core.wayback_change_date("https://x.org/", _now()) is None
+    assert len(calls) == 1 and calls[0]["url"] == "x.org/"
+
+
+def test_an_archive_change_over_a_year_old_dates_nothing(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_cdx", lambda params: [
+        ["20250101000000", "A", "9000"], ["20250601000000", "B", "9000"],
+        ["20251201000000", "B", "9000"], ["20260901000000", "B", "9000"]])
+    assert core.wayback_change_date("https://x.org/", _now()) is None
+
+
+def test_a_recent_archive_change_is_a_date(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_cdx", lambda params: [
+        ["20260101000000", "A", "9000"], ["20260601000000", "B", "9000"],
+        ["20260801000000", "B", "9000"], ["20260901000000", "B", "9000"]])
+    assert core.wayback_change_date("https://x.org/", _now()).month == 6
+
+
+def test_an_archive_answering_with_a_server_error_is_paused(monkeypatch):
+    from liveliness import core
+    class R:
+        status_code = 502
+        text = ""
+    monkeypatch.setattr(core.SESSION, "get", lambda *a, **k: R())
+    monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
+    monkeypatch.setattr(core, "_wayback_last_call", 0.0)
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    assert core._cdx({"url": "x.org/"}) is None
+    assert core._wayback_paused_till > core.time.monotonic()
 
 
 def test_an_archive_that_stopped_capturing_the_page_dates_nothing(monkeypatch):
@@ -487,8 +538,7 @@ def test_an_archive_change_scores_like_the_footer_copyright():
     from liveliness import core
     now = _now()
     assert core.wayback_recency_score(now - timedelta(days=30), now) == core.COPYRIGHT_FRESH_FLOOR
-    assert core.wayback_recency_score(now - timedelta(days=500), now) == 25
-    assert core.wayback_recency_score(now - timedelta(days=4000), now) == 3
+    assert core.wayback_recency_score(now - timedelta(days=500), now) == 0
 
 
 def _undated_live_site(monkeypatch, core):
@@ -584,6 +634,34 @@ def test_an_archive_capture_is_not_written_as_the_projects_last_activity(monkeyp
     r = core.score_project(Project(name="x", website="https://x.org/"))
     assert r["score"] == 50
     assert r["last_activity_date"] is None
+
+
+def test_a_walled_site_scored_from_the_archive_says_so(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    monkeypatch.setattr(core, "probe_site", lambda u: (None, False, "blocked"))
+    monkeypatch.setattr(core, "render_page_text", lambda u: None)
+    monkeypatch.setattr(core, "wayback_change_date",
+                        lambda u, now=None: datetime.now(timezone.utc) - timedelta(days=100))
+    r = core.score_project(Project(name="x", website="https://x.org/"))
+    assert "not evidence either way" not in r["breakdown"]
+    assert "rests on the Wayback Machine" in r["breakdown"]
+
+
+def test_a_fresh_footer_copyright_makes_the_archive_moot(monkeypatch):
+    from datetime import datetime, timezone
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    year = datetime.now(timezone.utc).year
+    page = ("<html><body>" + "<p>We help cities listen to residents.</p>" * 20 +
+            "<footer>&copy; %d Example</footer></body></html>" % year)
+    monkeypatch.setattr(core, "get_page_cached", lambda u: (page, {}))
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
+    def never(*a, **k):
+        raise AssertionError("the archive cannot add to the copyright floor")
+    monkeypatch.setattr(core, "wayback_change_date", never)
+    assert core.score_project(Project(name="x", website="https://x.org/"))["score"] == 45
 
 
 def test_a_dead_site_is_not_dated_by_the_archive(monkeypatch):

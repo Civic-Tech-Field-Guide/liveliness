@@ -117,11 +117,12 @@ def get_page_cached(url):
     return val
 
 
-def get_limited(url, timeout=10, headers=None):
+def get_limited(url, timeout=10, headers=None, deadline_s=None):
     """GET that stops reading at MAX_FETCH_BYTES or FETCH_DEADLINE_S of
     wall-clock time, whichever comes first. Raises like requests.get.
     A server dripping bytes too slowly to ever fill a chunk can still hold
     the read open — the per-record SIGALRM budget is the backstop there."""
+    limit = FETCH_DEADLINE_S if deadline_s is None else min(deadline_s, FETCH_DEADLINE_S)
     r = SESSION.get(url, timeout=timeout, allow_redirects=True, stream=True,
                     headers=headers)
     start, size, chunks = time.monotonic(), 0, []
@@ -129,7 +130,7 @@ def get_limited(url, timeout=10, headers=None):
         for chunk in r.iter_content(chunk_size=8192):
             chunks.append(chunk)
             size += len(chunk)
-            if size >= MAX_FETCH_BYTES or time.monotonic() - start > FETCH_DEADLINE_S:
+            if size >= MAX_FETCH_BYTES or time.monotonic() - start > limit:
                 break
     finally:
         r.close()
@@ -1825,7 +1826,7 @@ def _sitemap_body(url, deadline):
     if remaining <= 1:
         return None
     try:
-        r = get_limited(url, timeout=min(SITEMAP_TIMEOUT_S, remaining))
+        r = get_limited(url, timeout=min(SITEMAP_TIMEOUT_S, remaining), deadline_s=remaining)
     except Exception:
         return None
     if r.status_code != 200 or not r.content:
@@ -1913,13 +1914,19 @@ def sitemap_newest_date(entries, now, prefix="", hosts=None):
         if dt is not None:
             dated.append(dt)
             raws.append(mod)
-    # Pages edited by hand do not share a timestamp to the second. A small
-    # sitemap whose every entry does was written in one pass by a generator.
-    if len(raws) >= 2 and len(set(raws)) == 1 and re.search(r"T\d\d:\d\d:\d\d", raws[0]):
+    # Pages edited by hand do not share a timestamp to the second. A sitemap
+    # whose every entry does was written in one pass by a generator. Below five
+    # entries one sitting of edits can look the same, so it is believed.
+    if (len(raws) >= SITEMAP_STAMP_MIN_COUNT and len(set(raws)) == 1
+            and re.search(r"T\d\d:\d\d:\d\d", raws[0])):
         return None
     if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
         day, count = Counter(d.date() for d in dated).most_common(1)[0]
-        if count >= SITEMAP_BUILD_SHARE * len(dated):
+        # Only an older build is set aside. When the build is the newest thing
+        # in the file, somebody deployed the site recently, and the two-day
+        # rule above already keeps out a sitemap generated per request.
+        if (count >= SITEMAP_BUILD_SHARE * len(dated)
+                and day < max(d.date() for d in dated)):
             dated = [d for d in dated if d.date() != day]
     fresh = [d for d in dated if (now - d).days >= LAST_MODIFIED_MIN_AGE_DAYS]
     return max(fresh, default=None)
@@ -1931,7 +1938,8 @@ def _robots_sitemaps(root, deadline):
     if remaining <= 1:
         return [], None
     try:
-        r = get_limited(root + "/robots.txt", timeout=min(SITEMAP_TIMEOUT_S, remaining))
+        r = get_limited(root + "/robots.txt", timeout=min(SITEMAP_TIMEOUT_S, remaining),
+                        deadline_s=remaining)
     except Exception:
         return [], None
     if r.status_code != 200:
@@ -2031,6 +2039,7 @@ WAYBACK_WINDOW        = 20      # recent captures read to judge churn
 WAYBACK_MAX_CHURN     = 0.5     # share of captures with a new hash that means churn
 WAYBACK_MIN_LENGTH    = 1500    # bytes; smaller captures are bot checks and stubs
 WAYBACK_RECENT_CAPTURE_DAYS = 365
+WAYBACK_RECENT_CHANGE_DAYS  = 365
 WAYBACK_MIN_INTERVAL_S = 4
 WAYBACK_PAUSE_S       = 600
 WAYBACK_LABEL         = "Last content change seen by the Wayback Machine"
@@ -2056,7 +2065,7 @@ def _cdx(params):
         _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
         _log("    wayback  → no answer; not asked again for a while")
         return None
-    if r.status_code in (429, 503):
+    if r.status_code == 429 or r.status_code >= 500:
         _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
         _log(f"    wayback  → refused ({r.status_code}); not asked again for a while")
         return None
@@ -2114,6 +2123,11 @@ def _real_capture(row):
 def wayback_change_date(url, now=None):
     """
     When the Wayback Machine last saw the page at url change, or None.
+
+    Only a change within WAYBACK_RECENT_CHANGE_DAYS is returned. The archive
+    is evidence that somebody is keeping a page up, and too weak to be the
+    evidence that somebody has stopped: an old change date would push a
+    listing down on the strength of when the archive happened to look.
     """
     now = now or datetime.now(timezone.utc)
     p = urlparse(url)
@@ -2132,36 +2146,32 @@ def wayback_change_date(url, now=None):
         _log("    wayback  → no recent capture of the page")
         return None
     dt, settled = wayback_change_from_captures(rows)
-    if dt is None and settled:
+    if dt is None:
         _log("    wayback  → too few captures, or the page changes on every capture")
         return None
     if not settled:
-        # Unchanged across the whole window, so the content is older than any
-        # of it. The archive's earliest capture with the same hash dates it.
-        first = _cdx(dict(base, filter=["statuscode:200", "digest:%s" % rows[-1][1]], limit=1))
-        if not first or first[0][1] != rows[-1][1]:
-            return None
-        dt = _cdx_time(first[0][0])
+        # Unchanged across the whole window: the change is somewhere before
+        # it, which is only a bound, and an old one at that.
+        _log("    wayback  → no change in the recent captures")
+        return None
+    if (now - dt).days > WAYBACK_RECENT_CHANGE_DAYS:
+        _log(f"    wayback  → last change {dt:%Y-%m-%d}, too old to count")
+        return None
     return reject_future(dt)
 
 
 def wayback_recency_score(dt, now):
     """
-    Score 0–45 for the last change the Wayback Machine saw.
+    45 for a change the Wayback Machine saw within the last year, else 0.
 
     45 is the footer copyright's floor: a page seen to change this year is a
     page somebody is keeping up, and no more than that. It never counts toward
     the website bonus, so a live site with a social account tops out in Likely
     Active on this evidence alone.
     """
-    if dt is None:
+    if dt is None or (now - dt).days > WAYBACK_RECENT_CHANGE_DAYS:
         return 0
-    age_days = max(0, (now - dt).days)
-    if age_days <= 365:  return 45
-    if age_days <= STALE_AFTER_DAYS: return 25
-    if age_days <= 1095: return 15
-    if age_days <= 1825: return 5
-    return 3
+    return COPYRIGHT_FRESH_FLOOR
 
 
 def footer_copyright_year(html):
@@ -2821,7 +2831,9 @@ def score_project(project):
                 _log(f"    sitemap  → newest change {found[0]:%Y-%m-%d} in {found[1][:70]}")
             else:
                 _log(f"    sitemap  → nothing dated and believable")
-        if not found:
+        fresh_footer = (page_copyright_year is not None
+                        and page_copyright_year >= now.year - 1)
+        if not found and not fresh_footer:
             changed = wayback_change_date(website_url, now)
             if changed:
                 candidates.append((wayback_recency_score(changed, now), changed, WAYBACK_LABEL))
@@ -2914,9 +2926,14 @@ def score_project(project):
         # Said out loud because it is a fact about the wall, not about the
         # project, and a reader comparing two low scores should be able to tell
         # "we could not look" from "we looked and found nothing".
-        why.append("The site is behind a bot check that refused both an ordinary "
-                   "request and a browser, so nothing on it could be read. This is "
-                   "not evidence either way about the project")
+        if any(c[2] == WAYBACK_LABEL for c in candidates):
+            why.append("The site is behind a bot check that refused both an ordinary "
+                       "request and a browser, so the score rests on the Wayback "
+                       "Machine's record of the page changing")
+        else:
+            why.append("The site is behind a bot check that refused both an ordinary "
+                       "request and a browser, so nothing on it could be read. This is "
+                       "not evidence either way about the project")
     else:
         why.append("Website could not be checked: it timed out or refused the request")
 

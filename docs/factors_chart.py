@@ -24,11 +24,12 @@ now = datetime.now(timezone.utc)
 dated_max = core.recency_base_score(now, now)
 page_max = core.page_recency_score(now, now)
 social_max = core.social_recency_score(now, now)
+archive_max = core.wayback_recency_score(now, now)
 
 factors = [
     ("Newest dated activity", dated_max,
      f"Only the single best of: GitHub, blog, news page ({dated_max}),\n"
-     f"the site's own dates ({page_max}), a social post ({social_max})"),
+     f"site dates or sitemap ({page_max}), social post ({social_max}), archive ({archive_max})"),
     ("Website responding", core.WEBSITE_ALIVE_BONUS,
      f"(Only {core.WEBSITE_ALIVE_BONUS_STALE} if nothing dated in the last year)"),
     ("Social accounts reachable", core.SOCIAL_REACHABLE_BONUS_MAX,
