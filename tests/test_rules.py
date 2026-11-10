@@ -217,6 +217,12 @@ def _now():
     return datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
 
 
+def test_the_activity_bands_are_public():
+    from liveliness import score_to_activity_status
+    assert [score_to_activity_status(s) for s in (70, 45, 20, 19)] == [
+        "Active", "Likely Active", "Possibly Inactive", "Inactive"]
+
+
 def test_a_sitemap_is_dated_by_its_newest_entry():
     from datetime import datetime, timezone
     from liveliness import core
@@ -258,6 +264,35 @@ def test_a_listing_deep_in_a_site_is_dated_by_its_own_section():
     assert core._path_prefix("https://x.org/lab/default.aspx") == "/lab"
 
 
+class _FakeResponse:
+    def __init__(self, url, body, status=200):
+        self.url = url
+        self.status_code = status
+        self.content = body.encode() if isinstance(body, str) else body
+        self.headers = {}
+
+    @property
+    def text(self):
+        return self.content.decode("utf-8", errors="replace")
+
+
+def _fake_web(monkeypatch, core, pages):
+    """
+    Serve `pages` in place of the network: {url: body} or {url: (body, final url)}.
+    Anything else answers 404. Returns the list of URLs requested.
+    """
+    seen = []
+    def get(url, timeout=10, headers=None):
+        seen.append(url)
+        page = pages.get(url)
+        if page is None:
+            return _FakeResponse(url, "<html>not found</html>", 404)
+        body, final = page if isinstance(page, tuple) else (page, url)
+        return _FakeResponse(final, body)
+    monkeypatch.setattr(core, "get_limited", get)
+    return seen
+
+
 def test_a_sitemap_index_is_followed_to_its_children(monkeypatch):
     from liveliness import core
     index = ('<sitemapindex><sitemap><loc>https://x.org/post-sitemap.xml</loc>'
@@ -265,31 +300,77 @@ def test_a_sitemap_index_is_followed_to_its_children(monkeypatch):
              '<sitemap><loc>https://x.org/page-sitemap.xml</loc></sitemap></sitemapindex>')
     posts = '<urlset><url><loc>https://x.org/p/1</loc><lastmod>2026-08-31</lastmod></url></urlset>'
     pages = '<urlset><url><loc>https://x.org/about</loc><lastmod>2021-01-01</lastmod></url></urlset>'
-    bodies = {"https://x.org/sitemap.xml": index,
-              "https://x.org/post-sitemap.xml": posts,
-              "https://x.org/page-sitemap.xml": pages}
-    seen = []
-    def body(url, deadline):
-        seen.append(url)
-        return bodies.get(url)
-    monkeypatch.setattr(core, "_sitemap_body", body)
-    monkeypatch.setattr(core, "_robots_sitemaps", lambda root, deadline: [])
+    seen = _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": index,
+                                         "https://x.org/post-sitemap.xml": posts,
+                                         "https://x.org/page-sitemap.xml": pages})
     dt, src = core.sitemap_date("https://x.org/", _now())
     assert (dt.month, dt.day) == (8, 31) and src.endswith("post-sitemap.xml")
-    assert len(seen) == 3
+    assert seen == ["https://x.org/robots.txt", "https://x.org/sitemap.xml",
+                    "https://x.org/post-sitemap.xml", "https://x.org/page-sitemap.xml"]
 
 
 def test_a_sitemap_named_in_robots_txt_is_read_first(monkeypatch):
     from liveliness import core
-    seen = []
-    def body(url, deadline):
-        seen.append(url)
-        return '<urlset><url><loc>https://x.org/</loc><lastmod>2026-02-01</lastmod></url></urlset>'
-    monkeypatch.setattr(core, "_sitemap_body", body)
-    monkeypatch.setattr(core, "_robots_sitemaps",
-                        lambda root, deadline: ["https://cdn.x.org/maps/main.xml"])
+    seen = _fake_web(monkeypatch, core, {
+        "https://x.org/robots.txt": "User-agent: *\nSitemap: https://cdn.x.org/maps/main.xml\n",
+        "https://cdn.x.org/maps/main.xml":
+            '<urlset><url><loc>https://x.org/</loc><lastmod>2026-02-01</lastmod></url></urlset>'})
     assert core.sitemap_date("https://x.org/", _now()) is not None
-    assert seen == ["https://cdn.x.org/maps/main.xml"]
+    assert seen == ["https://x.org/robots.txt", "https://cdn.x.org/maps/main.xml"]
+
+
+def test_a_sitemap_with_nothing_usable_does_not_end_the_search(monkeypatch):
+    # robots.txt names another site's sitemap. Every entry in it is filtered
+    # out, and the site's own /sitemap.xml still has to be read.
+    from liveliness import core
+    _fake_web(monkeypatch, core, {
+        "https://x.org/robots.txt": "Sitemap: https://news.example/sitemap.xml\n",
+        "https://news.example/sitemap.xml":
+            '<urlset><url><loc>https://news.example/a</loc><lastmod>2026-11-01</lastmod></url></urlset>',
+        "https://x.org/sitemap.xml":
+            '<urlset><url><loc>https://x.org/</loc><lastmod>2025-04-01</lastmod></url></urlset>'})
+    dt, src = core.sitemap_date("https://x.org/", _now())
+    assert (dt.year, dt.month) == (2025, 4) and src == "https://x.org/sitemap.xml"
+
+
+def test_a_site_that_redirects_is_dated_by_the_host_it_lands_on(monkeypatch):
+    from liveliness import core
+    _fake_web(monkeypatch, core, {
+        "http://oldname.org/sitemap.xml": (
+            '<urlset><url><loc>https://www.newname.org/about</loc><lastmod>2026-03-01</lastmod></url>'
+            '<url><loc>/team</loc><lastmod>2026-05-01</lastmod></url></urlset>',
+            "https://www.newname.org/sitemap.xml")})
+    dt, src = core.sitemap_date("http://oldname.org/", _now())
+    assert (dt.year, dt.month) == (2026, 5) and src == "https://www.newname.org/sitemap.xml"
+
+
+def test_a_truncated_gzip_sitemap_is_still_read(monkeypatch):
+    # Downloads stop at MAX_FETCH_BYTES, so a large .xml.gz arrives cut short.
+    import gzip
+    from liveliness import core
+    entries = "".join('<url><loc>https://x.org/p/%d</loc><lastmod>2025-%02d-01</lastmod></url>'
+                      % (i, 1 + i % 12) for i in range(3000))
+    whole = gzip.compress(('<urlset>%s</urlset>' % entries).encode())
+    _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": whole[: len(whole) // 2]})
+    dt, _ = core.sitemap_date("https://x.org/", _now())
+    assert (dt.year, dt.month) == (2025, 12)
+
+
+def test_a_sitemap_stamp_on_nearly_every_entry_is_a_build(monkeypatch):
+    # A deploy restamps the generated pages; the few hand-dated ones remain.
+    from liveliness import core
+    entries = [("https://x.org/p/%d" % i, "2026-08-30T0%d:00:00Z" % (i % 10)) for i in range(18)]
+    entries += [("https://x.org/", "2025-09-05"), ("https://x.org/about", "2025-06-01")]
+    dt = core.sitemap_newest_date(entries, _now())
+    assert (dt.year, dt.month, dt.day) == (2025, 9, 5)
+    assert core.sitemap_newest_date(entries[:18], _now()) is None
+
+
+def test_an_image_address_inside_an_entry_is_not_the_entry():
+    from liveliness import core
+    text = ('<urlset><url><image:image><image:loc>https://cdn.example/a.png</image:loc></image:image>'
+            '<loc>https://x.org/page</loc><lastmod>2026-01-01</lastmod></url></urlset>')
+    assert core.parse_sitemap(text)[1] == [("https://x.org/page", "2026-01-01")]
 
 
 # ── Wayback Machine change dates ──────────────────────────────────────────────
@@ -367,10 +448,9 @@ def test_a_sitemap_of_another_site_says_nothing_about_this_one():
 
 def test_a_sitemap_that_lists_bare_paths_is_read_as_its_own_site(monkeypatch):
     from liveliness import core
-    monkeypatch.setattr(core, "_robots_sitemaps", lambda root, deadline: [])
-    monkeypatch.setattr(core, "_sitemap_body", lambda url, deadline:
-                        '<urlset><url><loc>/orgs/a/</loc><lastmod>2019-12-12T22:57:14+00:00</lastmod>'
-                        '</url></urlset>')
+    _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml":
+              '<urlset><url><loc>/orgs/a/</loc><lastmod>2019-12-12T22:57:14+00:00</lastmod>'
+              '</url></urlset>'})
     dt, _ = core.sitemap_date("https://x.org/", _now())
     assert dt.year == 2019
 
@@ -453,6 +533,46 @@ def test_a_bot_walled_site_can_be_dated_by_the_archive(monkeypatch):
     r = core.score_project(Project(name="x", website="https://x.org/"))
     assert r["score"] == 45 and r["activity_status"] == "Likely Active"
     assert r["status"] is None
+
+
+def test_a_bot_walled_site_is_not_asked_for_its_sitemap(monkeypatch):
+    # The wall that refused the homepage refuses the sitemap as well.
+    from datetime import datetime, timedelta, timezone
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    monkeypatch.setattr(core, "probe_site", lambda u: (None, False, "blocked"))
+    monkeypatch.setattr(core, "render_page_text", lambda u: None)
+    def never(*a):
+        raise AssertionError("not asked behind a wall")
+    monkeypatch.setattr(core, "sitemap_date", never)
+    asked = []
+    monkeypatch.setattr(core, "wayback_change_date",
+                        lambda u, now=None: asked.append(u) or None)
+    core.score_project(Project(name="x", website="https://x.org/"))
+    assert asked == ["https://x.org/"]
+
+
+def test_a_site_that_did_not_answer_is_not_dated_by_the_last_resorts(monkeypatch):
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    monkeypatch.setattr(core, "probe_site", lambda u: (None, False, "unknown"))
+    def never(*a):
+        raise AssertionError("a site that timed out is not looked up")
+    monkeypatch.setattr(core, "sitemap_date", never)
+    monkeypatch.setattr(core, "wayback_change_date", never)
+    assert core.score_project(Project(name="x", website="https://x.org/"))["activity_status"] == "Unknown"
+
+
+def test_an_archive_capture_is_not_written_as_the_projects_last_activity(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
+    monkeypatch.setattr(core, "wayback_change_date",
+                        lambda u, now=None: datetime.now(timezone.utc) - timedelta(days=10))
+    r = core.score_project(Project(name="x", website="https://x.org/"))
+    assert r["score"] == 50
+    assert r["last_activity_date"] is None
 
 
 def test_a_dead_site_is_not_dated_by_the_archive(monkeypatch):

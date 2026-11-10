@@ -29,6 +29,7 @@ import os
 import re
 import socket
 import time
+from collections import Counter
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser as _HTMLParser
@@ -1791,12 +1792,35 @@ SITEMAP_STAMP_MIN_COUNT = 5     # entries that must share a stamp to call it a b
 SITEMAP_LABEL           = "Newest change listed in the site's sitemap"
 
 _SITEMAP_ENTRY_RE = re.compile(r"<(?:\w+:)?(url|sitemap)\b[^>]*>([\s\S]*?)</(?:\w+:)?\1\s*>", re.I)
-_SITEMAP_LOC_RE   = re.compile(r"<(?:\w+:)?loc\b[^>]*>\s*(?:<!\[CDATA\[)?\s*([^<\]\s]+)", re.I)
+# The image, video and news extensions put a <loc> of their own inside an
+# entry, and one of those can come before the page's own address.
+_SITEMAP_LOC_RE   = re.compile(r"<(?!(?:image|video|news|xhtml):)(?:\w+:)?loc\b[^>]*>"
+                               r"\s*(?:<!\[CDATA\[)?\s*([^<\]\s]+)", re.I)
 _SITEMAP_MOD_RE   = re.compile(r"<(?:\w+:)?lastmod\b[^>]*>\s*([^<\s]+)", re.I)
+SITEMAP_MAX_TEXT_BYTES = 8_000_000     # unpacked size kept from a .gz sitemap
+SITEMAP_BUILD_SHARE    = 0.8           # share of entries on one day that means a build
+
+
+def _gunzip_prefix(body):
+    """
+    As much of a gzip body as unpacks, capped at SITEMAP_MAX_TEXT_BYTES.
+
+    The download stops at MAX_FETCH_BYTES, so a large .xml.gz usually arrives
+    cut short. The entries in the part that did arrive are still good, and a
+    small file that unpacks to something huge is cut off rather than held.
+    """
+    import zlib
+    try:
+        return zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(body, SITEMAP_MAX_TEXT_BYTES)
+    except zlib.error:
+        return None
 
 
 def _sitemap_body(url, deadline):
-    """The text of a sitemap at url, or None when it is not one."""
+    """
+    (text, final url) for the sitemap at url, or None when it is not one. The
+    final url is where any redirect landed.
+    """
     remaining = deadline - time.monotonic()
     if remaining <= 1:
         return None
@@ -1808,16 +1832,14 @@ def _sitemap_body(url, deadline):
         return None
     body = r.content
     if body[:2] == b"\x1f\x8b":
-        import gzip
-        try:
-            body = gzip.decompress(body)
-        except Exception:
+        body = _gunzip_prefix(body)
+        if not body:
             return None
     text = body.decode("utf-8", errors="replace")
     # A missing sitemap often answers 200 with the site's own 404 page.
     if not re.search(r"<(?:\w+:)?(?:urlset|sitemapindex)\b", text[:5000], re.I):
         return None
-    return text
+    return text, (r.url or url)
 
 
 def parse_sitemap(text):
@@ -1852,48 +1874,66 @@ def _within(loc, prefix):
     return path == prefix or path.startswith(prefix + "/")
 
 
-def _same_site(loc, host):
-    """True when a sitemap entry is on the listed site, with or without www."""
-    if not host:
+def _site_host(url):
+    """A URL's host without a leading www, for telling one site from another."""
+    return (_netloc(url) or "").removeprefix("www.")
+
+
+def _same_site(loc, hosts):
+    """
+    True when a sitemap entry is on the listed site. `hosts` is the listed host
+    and any host the site redirected to, or a single host, or empty for any.
+    """
+    if not hosts:
         return True
-    return (_netloc(loc) or "").lower().removeprefix("www.") == host
+    if isinstance(hosts, str):
+        hosts = {hosts}
+    return _site_host(loc) in hosts
 
 
-def sitemap_newest_date(entries, now, prefix="", host=None):
+def sitemap_newest_date(entries, now, prefix="", hosts=None):
     """
     The newest believable lastmod among a sitemap's entries, or None.
 
     Only entries at or under `prefix` count, so a listing that points deep into
     a large site is dated by its own section rather than by the whole site. And
-    only entries on `host`: a robots.txt can name a sitemap of another site
+    only entries on `hosts`: a robots.txt can name a sitemap of another site
     entirely, and that site's changes say nothing about this one.
+
+    A deploy that regenerates the site restamps every generated page with the
+    day of the build. When one day carries SITEMAP_BUILD_SHARE of the entries,
+    that day is the build and is set aside, and the entries left over, usually
+    the pages somebody edited by hand, date the site.
     """
-    raws = [mod for loc, mod in entries
-            if mod and _same_site(loc, host) and _within(loc, prefix)]
-    if len(raws) >= SITEMAP_STAMP_MIN_COUNT and len(set(raws)) == 1:
-        return None     # every entry carries one stamp: the build, not the pages
-    best = None
-    for raw in raws:
-        dt = _parse_date_loose(raw, now)
-        if dt is None or (now - dt).days < LAST_MODIFIED_MIN_AGE_DAYS:
+    dated = []
+    for loc, mod in entries:
+        if not mod or not _same_site(loc, hosts) or not _within(loc, prefix):
             continue
-        if best is None or dt > best:
-            best = dt
-    return best
+        dt = _parse_date_loose(mod, now)
+        if dt is not None:
+            dated.append(dt)
+    if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
+        day, count = Counter(d.date() for d in dated).most_common(1)[0]
+        if count >= SITEMAP_BUILD_SHARE * len(dated):
+            dated = [d for d in dated if d.date() != day]
+    fresh = [d for d in dated if (now - d).days >= LAST_MODIFIED_MIN_AGE_DAYS]
+    return max(fresh, default=None)
 
 
 def _robots_sitemaps(root, deadline):
+    """(sitemap urls named in robots.txt, host the request landed on)."""
     remaining = deadline - time.monotonic()
     if remaining <= 1:
-        return []
+        return [], None
     try:
         r = get_limited(root + "/robots.txt", timeout=min(SITEMAP_TIMEOUT_S, remaining))
     except Exception:
-        return []
+        return [], None
     if r.status_code != 200:
-        return []
+        return [], None
     found = re.findall(r"(?im)^\s*sitemap\s*:\s*(\S+)", r.text[:200_000])
-    return [u for u in found if u.lower().startswith(("http://", "https://"))][:3]
+    return ([u for u in found if u.lower().startswith(("http://", "https://"))][:3],
+            _site_host(r.url) or None)
 
 
 def sitemap_date(url, now):
@@ -1902,36 +1942,48 @@ def sitemap_date(url, now):
     lists for the listed address, or None.
 
     Sitemaps named in robots.txt come first, then the usual addresses. The first
-    one that turns out to be a real sitemap is the one read: a site that
-    publishes several usually publishes the same list under each name.
+    one that yields a date is the one used: a site that publishes several
+    usually publishes the same list under each name. One that yields nothing,
+    such as another site's sitemap named in robots.txt, does not end the search.
+
+    Entries count when they are on the listed host or on a host the site
+    redirects to, since a site that moved to a new name or to www lists its
+    pages under the name it moved to.
     """
     p = urlparse(url)
     if not p.netloc:
         return None
     root = "%s://%s" % (p.scheme or "https", p.netloc)
     prefix = _path_prefix(url)
-    host = p.netloc.lower().removeprefix("www.")
+    hosts = {_site_host(url)}
     deadline = time.monotonic() + SITEMAP_DEADLINE_S
     fetches = 1
-    tops = _robots_sitemaps(root, deadline)
+    tops, landed = _robots_sitemaps(root, deadline)
+    if landed:
+        hosts.add(landed)
     tops += [root + s for s in SITEMAP_PATHS if root + s not in tops]
 
     for top in tops:
         if fetches >= SITEMAP_MAX_FETCHES:
             break
         fetches += 1
-        text = _sitemap_body(top, deadline)
-        if text is None:
+        got = _sitemap_body(top, deadline)
+        if got is None:
             continue
+        text, final = got
+        # Where the site's own address redirected is the site too. A sitemap
+        # robots.txt names on some other host does not make that host this site.
+        if _site_host(top) in hosts:
+            hosts.add(_site_host(final))
         best = None
-        queue = [(top, text, 0)]
+        queue = [(final, text, 0)]
         while queue:
             src, body, depth = queue.pop(0)
             kind, entries = parse_sitemap(body)
             # Some sitemaps list paths rather than full addresses.
             entries = [(urljoin(src, loc), mod) for loc, mod in entries]
             if kind == "urlset":
-                dt = sitemap_newest_date(entries, now, prefix, host)
+                dt = sitemap_newest_date(entries, now, prefix, hosts)
                 if dt and (best is None or dt > best[0]):
                     best = (dt, src)
                 continue
@@ -1943,10 +1995,11 @@ def sitemap_date(url, now):
                 if fetches >= SITEMAP_MAX_FETCHES:
                     break
                 fetches += 1
-                child = _sitemap_body(urljoin(src, loc), deadline)
+                child = _sitemap_body(loc, deadline)
                 if child is not None:
-                    queue.append((urljoin(src, loc), child, depth + 1))
-        return best
+                    queue.append((child[1], child[0], depth + 1))
+        if best:
+            return best
     return None
 
 
@@ -2746,15 +2799,17 @@ def score_project(project):
     # dated nothing: the site's sitemap, then the archive's record of when the
     # page last changed. Both are asked only here, when the record would
     # otherwise be Unknown, because both cost requests and both are weaker than
-    # any signal already found. A site that is gone, or a page that moved, is
-    # not asked: the archive would date the page that is no longer there.
+    # any signal already found. A site that did not respond, is gone, or whose
+    # page moved is not asked: the archive would date a page nobody can reach.
     # An article with no homepage found in it, or an address that cannot be
     # checked, is not the project's site, so neither is asked about either.
+    # Behind a wall only the archive is asked, since the wall that refused the
+    # homepage refuses the sitemap too.
     project_site = url_class == "homepage" or (url_class == "article" and discovered_url)
     if (not candidates and website_url and project_site and not page_closed
-            and not is_archived and site_verdict in ("ok", "blocked", "unknown")):
+            and not is_archived and site_verdict in ("ok", "blocked")):
         found = None
-        if website_alive is True or site_verdict == "blocked":
+        if website_alive is True and site_verdict == "ok":
             found = sitemap_date(website_url, now)
             if found:
                 candidates.append((page_recency_score(found[0], now), found[0], SITEMAP_LABEL))
@@ -2769,8 +2824,10 @@ def score_project(project):
 
     best_score = max((c[0] for c in candidates), default=0)
     best_date  = max((c[1] for c in candidates), default=None)
-    # The archive's date is not the project's own, so it does not earn a live
-    # site the bonus that a recent dated signal does.
+    # The archive's date is when the archive looked, not something the project
+    # did, so it counts toward the score and nothing else: it does not earn a
+    # live site the bonus a recent dated signal does, and it is not reported as
+    # the project's last activity.
     bonus_date = max((c[1] for c in candidates if c[2] != WAYBACK_LABEL), default=None)
 
     score = float(best_score)
@@ -3065,7 +3122,7 @@ def score_project(project):
         why.append(f"Total: {score:g} out of 100 - {activity_status}")
     breakdown = "\n".join(why)
 
-    last_activity_str = best_date.strftime("%Y-%m-%d") if best_date else None
+    last_activity_str = bonus_date.strftime("%Y-%m-%d") if bonus_date else None
     _log(f"    → score={'(cleared)' if score is None else score}  activity={activity_status}  "
           f"status={status or '(no change)'}  last_activity={last_activity_str}")
     if discovered_url:
