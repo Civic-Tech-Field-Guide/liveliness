@@ -327,13 +327,52 @@ def test_an_unchanged_page_is_dated_by_when_its_content_first_appeared(monkeypat
     calls = []
     def cdx(params):
         calls.append(params)
-        if params.get("collapse"):
-            return [["20190405000000", "A"]]
-        return [["20260101000000", "A"], ["20260201000000", "A"], ["20260301000000", "A"]]
+        if params.get("limit") == 1:
+            assert "digest:A" in params["filter"]
+            return [["20190405000000", "A", "9000"]]
+        return [["20260101000000", "A", "9000"], ["20260201000000", "A", "9100"],
+                ["20260301000000", "A", "9050"]]
     monkeypatch.setattr(core, "_cdx", cdx)
-    dt = core.wayback_change_date("https://x.org/")
+    dt = core.wayback_change_date("https://x.org/", _now())
     assert (dt.year, dt.month) == (2019, 4) and len(calls) == 2
     assert calls[0]["url"] == "x.org/"
+
+
+def test_an_archive_that_stopped_capturing_the_page_dates_nothing(monkeypatch):
+    # The page may have changed every week since; the archive has not looked.
+    from liveliness import core
+    monkeypatch.setattr(core, "_cdx", lambda params: [
+        ["20241101000000", "A", "9000"], ["20241201000000", "B", "9000"],
+        ["20241215000000", "B", "9000"], ["20241220000000", "B", "9000"]])
+    assert core.wayback_change_date("https://x.org/", _now()) is None
+
+
+def test_getting_past_a_bot_check_is_not_a_content_change(monkeypatch):
+    # Small captures are the archive being shown a challenge page. The page
+    # behind it appearing in a later capture is not the site changing.
+    from liveliness import core
+    monkeypatch.setattr(core, "_cdx", lambda params: [
+        ["20260101000000", "WALL", "300"], ["20260201000000", "WALL", "545"],
+        ["20260301000000", "WALL", "550"], ["20260520000000", "PAGE", "23745"]])
+    assert core.wayback_change_date("https://x.org/", _now()) is None
+
+
+def test_a_sitemap_of_another_site_says_nothing_about_this_one():
+    from liveliness import core
+    entries = [("https://news.example/story/1", "2026-11-01"), ("https://www.x.org/", "2025-02-01")]
+    dt = core.sitemap_newest_date(entries, _now(), "", "x.org")
+    assert (dt.year, dt.month) == (2025, 2)
+    assert core.sitemap_newest_date(entries[:1], _now(), "", "x.org") is None
+
+
+def test_a_sitemap_that_lists_bare_paths_is_read_as_its_own_site(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_robots_sitemaps", lambda root, deadline: [])
+    monkeypatch.setattr(core, "_sitemap_body", lambda url, deadline:
+                        '<urlset><url><loc>/orgs/a/</loc><lastmod>2019-12-12T22:57:14+00:00</lastmod>'
+                        '</url></urlset>')
+    dt, _ = core.sitemap_date("https://x.org/", _now())
+    assert dt.year == 2019
 
 
 def test_an_archive_that_cannot_be_asked_is_no_evidence(monkeypatch):
@@ -378,7 +417,7 @@ def test_an_undated_site_with_a_sitemap_date_is_scored(monkeypatch):
     _undated_live_site(monkeypatch, core)
     when = datetime.now(timezone.utc) - timedelta(days=40)
     monkeypatch.setattr(core, "sitemap_date", lambda u, now: (when, "https://x.org/sitemap.xml"))
-    def no_archive(u):
+    def no_archive(u, now=None):
         raise AssertionError("the archive is not asked once the sitemap answered")
     monkeypatch.setattr(core, "wayback_change_date", no_archive)
     r = core.score_project(Project(name="x", website="https://x.org/"))
@@ -395,7 +434,7 @@ def test_an_archive_change_alone_never_reaches_active(monkeypatch):
     monkeypatch.setattr(core, "check_social_recency", lambda u: (None, "Bluesky"))
     monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
     monkeypatch.setattr(core, "wayback_change_date",
-                        lambda u: datetime.now(timezone.utc) - timedelta(days=10))
+                        lambda u, now=None: datetime.now(timezone.utc) - timedelta(days=10))
     r = core.score_project(Project(name="x", website="https://x.org/"))
     # 45 for the change, 5 because the site's own dates are not recent, 10 social.
     assert r["score"] == 60 and r["activity_status"] == "Likely Active"
@@ -410,7 +449,7 @@ def test_a_bot_walled_site_can_be_dated_by_the_archive(monkeypatch):
     monkeypatch.setattr(core, "render_page_text", lambda u: None)
     monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
     monkeypatch.setattr(core, "wayback_change_date",
-                        lambda u: datetime.now(timezone.utc) - timedelta(days=100))
+                        lambda u, now=None: datetime.now(timezone.utc) - timedelta(days=100))
     r = core.score_project(Project(name="x", website="https://x.org/"))
     assert r["score"] == 45 and r["activity_status"] == "Likely Active"
     assert r["status"] is None

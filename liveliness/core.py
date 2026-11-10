@@ -1852,14 +1852,24 @@ def _within(loc, prefix):
     return path == prefix or path.startswith(prefix + "/")
 
 
-def sitemap_newest_date(entries, now, prefix=""):
+def _same_site(loc, host):
+    """True when a sitemap entry is on the listed site, with or without www."""
+    if not host:
+        return True
+    return (_netloc(loc) or "").lower().removeprefix("www.") == host
+
+
+def sitemap_newest_date(entries, now, prefix="", host=None):
     """
     The newest believable lastmod among a sitemap's entries, or None.
 
     Only entries at or under `prefix` count, so a listing that points deep into
-    a large site is dated by its own section rather than by the whole site.
+    a large site is dated by its own section rather than by the whole site. And
+    only entries on `host`: a robots.txt can name a sitemap of another site
+    entirely, and that site's changes say nothing about this one.
     """
-    raws = [mod for loc, mod in entries if mod and _within(loc, prefix)]
+    raws = [mod for loc, mod in entries
+            if mod and _same_site(loc, host) and _within(loc, prefix)]
     if len(raws) >= SITEMAP_STAMP_MIN_COUNT and len(set(raws)) == 1:
         return None     # every entry carries one stamp: the build, not the pages
     best = None
@@ -1900,6 +1910,7 @@ def sitemap_date(url, now):
         return None
     root = "%s://%s" % (p.scheme or "https", p.netloc)
     prefix = _path_prefix(url)
+    host = p.netloc.lower().removeprefix("www.")
     deadline = time.monotonic() + SITEMAP_DEADLINE_S
     fetches = 1
     tops = _robots_sitemaps(root, deadline)
@@ -1917,8 +1928,10 @@ def sitemap_date(url, now):
         while queue:
             src, body, depth = queue.pop(0)
             kind, entries = parse_sitemap(body)
+            # Some sitemaps list paths rather than full addresses.
+            entries = [(urljoin(src, loc), mod) for loc, mod in entries]
             if kind == "urlset":
-                dt = sitemap_newest_date(entries, now, prefix)
+                dt = sitemap_newest_date(entries, now, prefix, host)
                 if dt and (best is None or dt > best[0]):
                     best = (dt, src)
                 continue
@@ -1958,6 +1971,8 @@ WAYBACK_CDX           = "https://web.archive.org/cdx/search/cdx"
 WAYBACK_TIMEOUT_S     = 10
 WAYBACK_WINDOW        = 20      # recent captures read to judge churn
 WAYBACK_MAX_CHURN     = 0.5     # share of captures with a new hash that means churn
+WAYBACK_MIN_LENGTH    = 1500    # bytes; smaller captures are bot checks and stubs
+WAYBACK_RECENT_CAPTURE_DAYS = 365
 WAYBACK_MIN_INTERVAL_S = 4
 WAYBACK_PAUSE_S       = 600
 WAYBACK_LABEL         = "Last content change seen by the Wayback Machine"
@@ -2015,7 +2030,7 @@ def wayback_change_from_captures(rows):
     """
     if len(rows) < 2:
         return None, True
-    digests = [d for _, d in rows]
+    digests = [r[1] for r in rows]
     changes = sum(1 for a, b in zip(digests, digests[1:]) if a != b)
     if changes / (len(rows) - 1) > WAYBACK_MAX_CHURN:
         return None, True
@@ -2030,30 +2045,45 @@ def wayback_change_from_captures(rows):
     return _cdx_time(rows[i][0]), i > 0
 
 
-def wayback_change_date(url):
+def _real_capture(row):
+    """False for a capture too small to be the page: a bot check or a redirect stub."""
+    try:
+        return int(row[2]) >= WAYBACK_MIN_LENGTH
+    except (IndexError, ValueError, TypeError):
+        return True
+
+
+def wayback_change_date(url, now=None):
     """
     When the Wayback Machine last saw the page at url change, or None.
     """
+    now = now or datetime.now(timezone.utc)
     p = urlparse(url)
     if not p.netloc:
         return None
     target = p.netloc + (p.path or "/")
-    base = {"url": target, "fl": "timestamp,digest", "filter": "statuscode:200"}
+    base = {"url": target, "fl": "timestamp,digest,length", "filter": "statuscode:200"}
     rows = _cdx(dict(base, limit=-WAYBACK_WINDOW))
     if not rows:
         return None
-    rows.sort(key=lambda r: r[0])
+    rows = sorted((r for r in rows if _real_capture(r)), key=lambda r: r[0])
+    # An archive that stopped capturing the page cannot say whether it has
+    # changed since, so an old last capture dates nothing.
+    newest = _cdx_time(rows[-1][0]) if rows else None
+    if newest is None or (now - newest).days > WAYBACK_RECENT_CAPTURE_DAYS:
+        _log("    wayback  → no recent capture of the page")
+        return None
     dt, settled = wayback_change_from_captures(rows)
     if dt is None and settled:
         _log("    wayback  → too few captures, or the page changes on every capture")
         return None
     if not settled:
-        # Unchanged across the whole window: the first capture of a run of
-        # identical captures is what collapsing on the hash returns.
-        runs = _cdx(dict(base, collapse="digest", limit=-1))
-        if not runs or runs[-1][1] != rows[-1][1]:
+        # Unchanged across the whole window, so the content is older than any
+        # of it. The archive's earliest capture with the same hash dates it.
+        first = _cdx(dict(base, filter=["statuscode:200", "digest:%s" % rows[-1][1]], limit=1))
+        if not first or first[0][1] != rows[-1][1]:
             return None
-        dt = _cdx_time(runs[-1][0])
+        dt = _cdx_time(first[0][0])
     return reject_future(dt)
 
 
@@ -2732,7 +2762,7 @@ def score_project(project):
             else:
                 _log(f"    sitemap  → nothing dated and believable")
         if not found:
-            changed = wayback_change_date(website_url)
+            changed = wayback_change_date(website_url, now)
             if changed:
                 candidates.append((wayback_recency_score(changed, now), changed, WAYBACK_LABEL))
                 _log(f"    wayback  → content last changed {changed:%Y-%m-%d}")
