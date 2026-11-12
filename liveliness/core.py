@@ -34,7 +34,7 @@ from collections import Counter
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser as _HTMLParser
-from urllib.parse import urljoin, parse_qs, urlparse
+from urllib.parse import urljoin, parse_qs, parse_qsl, urlparse
 
 import requests
 
@@ -1882,6 +1882,15 @@ def _within(loc, prefix):
     return path == prefix or path.startswith(prefix + "/")
 
 
+_TRACKING_PARAM = re.compile(r"^(?:utm_\w+|fbclid|gclid|mc_cid|mc_eid|ref|source)$", re.I)
+
+
+def _identifying_query(query):
+    """True when a query string picks out the page, not just tags the visit."""
+    return any(not _TRACKING_PARAM.match(k)
+               for k, _ in parse_qsl(query or "", keep_blank_values=True))
+
+
 def _site_host(url):
     """A URL's host without a leading www, for telling one site from another."""
     return (_netloc(url) or "").removeprefix("www.")
@@ -1895,6 +1904,21 @@ def _same_site(loc, hosts):
     if not hosts:
         return True
     return _site_host(loc) in hosts
+
+
+# Where a candidate date came from: the project's own evidence, or one of the
+# two last resorts.
+OWN, SITEMAP, WAYBACK = "own", "sitemap", "wayback"
+
+
+def _build_stamp(mod):
+    """
+    A lastmod reduced to what one generator pass shares: (day, "HH:MM") for a
+    stamp with a time, (day, None) for a bare date. A pass that takes a few
+    seconds writes stamps that differ in the seconds or milliseconds only.
+    """
+    m = re.search(r"(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?", mod)
+    return (m.group(1), m.group(2)) if m else (mod.strip(), None)
 
 
 def sitemap_newest_date(entries, now, prefix="", hosts=None):
@@ -1917,24 +1941,24 @@ def sitemap_newest_date(entries, now, prefix="", hosts=None):
             continue
         dt = _parse_date_loose(mod, now)
         if dt is not None:
-            raws.append(mod)
+            stamp = _build_stamp(mod)
+            raws.append(stamp)
             # The server's clock, not a change: dropped before anything else
             # is judged, so one such entry cannot make a real build look old.
             if (now - dt).days >= LAST_MODIFIED_MIN_AGE_DAYS:
-                dated.append((dt, mod))
+                dated.append((dt, stamp))
     # A generator that writes one stamp on every entry, a date or a time, says
     # when the file was built, not when anything changed. Below five entries
     # one sitting of edits can look the same, so it is believed.
     if len(raws) >= SITEMAP_STAMP_MIN_COUNT and len(set(raws)) == 1:
         return None
-    # Pages edited by hand do not share a timestamp to the second. When one such
+    # Pages edited by hand do not share a time to the minute. When one such
     # stamp covers SITEMAP_BUILD_SHARE of the entries, a generator wrote them in
     # one pass, so they are set aside even when the pass is the newest thing in
     # the file, and the rest date the site.
     if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
         stamp, count = Counter(m for _, m in dated).most_common(1)[0]
-        if (count >= SITEMAP_BUILD_SHARE * len(dated)
-                and re.search(r"T\d\d:\d\d:\d\d", stamp)):
+        if count >= SITEMAP_BUILD_SHARE * len(dated) and stamp[1] is not None:
             dated = [(d, m) for d, m in dated if m != stamp]
     dated = [d for d, _ in dated]
     if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
@@ -1982,14 +2006,18 @@ def sitemap_date(url, now):
     p = urlparse(url)
     if not p.netloc:
         return None
+    # A page named by its query or by a #/ route shares its path with every
+    # other page of that kind, so no sitemap entry can be told to be this one.
+    if _identifying_query(p.query) or p.fragment.startswith("/"):
+        return None
     root = "%s://%s" % (p.scheme or "https", p.netloc)
     prefix = _path_prefix(url)
     hosts = {_site_host(url)}
     deadline = time.monotonic() + SITEMAP_DEADLINE_S
     fetches = 1
-    tops, landed = _robots_sitemaps(root, deadline)
-    if landed:
-        hosts.add(landed)
+    # Where robots.txt itself redirects is not evidence of the site's host: a
+    # parked or hijacked robots.txt can land anywhere.
+    tops, _ = _robots_sitemaps(root, deadline)
     tops += [root + s for s in SITEMAP_PATHS if root + s not in tops]
 
     for top in tops:
@@ -2004,7 +2032,9 @@ def sitemap_date(url, now):
         # robots.txt names on some other host does not make that host this site.
         if _site_host(top) in hosts:
             hosts.add(_site_host(final))
-        best = None
+        # Every entry under one top sitemap is judged together, so a generator
+        # pass split across many small child files is still one pass.
+        gathered = []
         queue = [(final, text, 0)]
         while queue:
             src, body, depth = queue.pop(0)
@@ -2012,11 +2042,7 @@ def sitemap_date(url, now):
             # Some sitemaps list paths rather than full addresses.
             entries = [(urljoin(src, loc), mod) for loc, mod in entries]
             if kind == "urlset":
-                dt = sitemap_newest_date(entries, now, prefix, hosts)
-                if dt and (now - dt).days > SITEMAP_MAX_AGE_DAYS:
-                    dt = None
-                if dt and (best is None or dt > best[0]):
-                    best = (dt, src)
+                gathered.append((src, entries))
                 continue
             if depth >= SITEMAP_MAX_DEPTH:
                 continue
@@ -2029,8 +2055,12 @@ def sitemap_date(url, now):
                 child = _sitemap_body(loc, deadline)
                 if child is not None:
                     queue.append((child[1], child[0], depth + 1))
-        if best:
-            return best
+        dt = sitemap_newest_date([e for _, ents in gathered for e in ents], now, prefix, hosts)
+        if dt and (now - dt).days <= SITEMAP_MAX_AGE_DAYS:
+            # Reported as the file that carried the date, for the breakdown.
+            src = next((src for src, ents in gathered
+                        if any(m and _parse_date_loose(m, now) == dt for _, m in ents)), final)
+            return dt, src
     return None
 
 
@@ -2168,6 +2198,8 @@ def wayback_change_date(url, now=None):
     if not p.netloc:
         return None
     target = p.netloc + (p.path or "/")
+    if _identifying_query(p.query):
+        target += "?" + p.query
     base = {"url": target, "fl": "timestamp,digest,length", "filter": "statuscode:200"}
     rows = _cdx(dict(base, limit=-WAYBACK_FETCH_ROWS, fastLatest="true"))
     if not rows:
@@ -2736,7 +2768,9 @@ def score_project(project):
     # were actually reached.
 
     # ── Combine all signals ───────────────────────────────────────────────────
-    # Every dated signal becomes a (points, date, label) candidate. The score is
+    # Every dated signal becomes a (points, date, label, source) candidate.
+    # source is OWN for evidence the project left, or SITEMAP or WAYBACK for
+    # the two last resorts, which count toward the score and nothing else. The score is
     # the single best of these and never their sum, which is exactly the part a
     # reader cannot infer from the final number, so the breakdown has to name
     # which signal won and show the others as also-rans.
@@ -2747,13 +2781,13 @@ def score_project(project):
         if github_archived:
             s = min(s, 15)  # maintainers explicitly stopped work on the repo
         kind = next((k for k, v in gh["dates"].items() if v == github_date), None)
-        candidates.append((s, github_date, GH_SIGNAL_LABELS.get(kind, "GitHub activity")))
+        candidates.append((s, github_date, GH_SIGNAL_LABELS.get(kind, "GitHub activity"), OWN))
 
     if blog_date:
-        candidates.append((recency_base_score(blog_date, now), blog_date, "Blog post"))
+        candidates.append((recency_base_score(blog_date, now), blog_date, "Blog post", OWN))
 
     for dt, platform in social_dated:
-        candidates.append((social_recency_score(dt, now), dt, f"{platform} post"))
+        candidates.append((social_recency_score(dt, now), dt, f"{platform} post", OWN))
 
     # What the project's own page says about itself. The page was already
     # downloaded for the social-link scrape, so this costs no extra request.
@@ -2761,6 +2795,7 @@ def score_project(project):
     page_unreadable = False
     page_closed, page_closed_phrase = False, None
     pending_adjudication = None
+    adjudication_words = None
 
     # A site behind a bot wall answered 403 or 429, which is the wall talking
     # and says nothing about the project. Roughly two thirds of them serve their
@@ -2819,24 +2854,22 @@ def score_project(project):
             page_signals = page_date_signals(page_html, page_headers, now, text=rendered)
             if page_signals:
                 pdt, plabel = max(page_signals, key=lambda c: c[0])
-                candidates.append((page_recency_score(pdt, now), pdt, plabel))
+                candidates.append((page_recency_score(pdt, now), pdt, plabel, OWN))
                 _log(f"    page     → {plabel}: {pdt:%Y-%m-%d}")
             news = latest_news_date(page_html, website_url, now) if page_html else None
             if news:
                 candidates.append((recency_base_score(news[0], now), news[0],
-                                   "Newest item on the site's own news page"))
+                                   "Newest item on the site's own news page", OWN))
             page_closed, page_closed_phrase = page_says_closed(page_html, now, text=rendered)
             if page_closed:
                 _log(f"    page     → says it has closed: {page_closed_phrase!r}")
             elif not page_unreadable and not page_signals and not news:
                 # The wording check found nothing and neither did any date. This
                 # is the narrow band the rules cannot settle, so it is the only
-                # band worth queueing for a reading. The run does not wait for
-                # one: it scores this record as though no reading existed.
-                words = rendered if rendered is not None else readable
-                pending_adjudication = adjudication_candidate(name, website_url, words)
-                if pending_adjudication:
-                    _log(f"    page     → nothing the rules can settle; queued for reading")
+                # band worth queueing for a reading, once the last resorts below
+                # have had their turn. The run does not wait for a reading: it
+                # scores this record as though none existed.
+                adjudication_words = rendered if rendered is not None else readable
             if page_unreadable:
                 _log(f"    page     → still unread after rendering")
             else:
@@ -2864,7 +2897,8 @@ def score_project(project):
         if website_alive is True and site_verdict == "ok":
             found = sitemap_date(website_url, now)
             if found:
-                candidates.append((page_recency_score(found[0], now), found[0], SITEMAP_LABEL))
+                candidates.append((page_recency_score(found[0], now), found[0],
+                                   SITEMAP_LABEL, SITEMAP))
                 _log(f"    sitemap  → newest change {found[0]:%Y-%m-%d} in {found[1][:70]}")
             else:
                 _log(f"    sitemap  → nothing dated and believable")
@@ -2873,8 +2907,17 @@ def score_project(project):
         if not found and not fresh_copyright and not js_shell:
             changed = wayback_change_date(website_url, now)
             if changed:
-                candidates.append((wayback_recency_score(changed, now), changed, WAYBACK_LABEL))
+                candidates.append((wayback_recency_score(changed, now), changed,
+                                   WAYBACK_LABEL, WAYBACK))
                 _log(f"    wayback  → content last changed {changed:%Y-%m-%d}")
+
+    # A page a last resort dated is settled, so a reading of it would only
+    # repeat what the scorer already used.
+    if adjudication_words is not None and not any(
+            c[0] > 0 and c[3] in (SITEMAP, WAYBACK) for c in candidates):
+        pending_adjudication = adjudication_candidate(name, website_url, adjudication_words)
+        if pending_adjudication:
+            _log(f"    page     → nothing the rules can settle; queued for reading")
 
     best_score = max((c[0] for c in candidates), default=0)
     best_date  = max((c[1] for c in candidates), default=None)
@@ -2882,7 +2925,7 @@ def score_project(project):
     # did, so it counts toward the score and nothing else: it does not earn a
     # live site the bonus a recent dated signal does, and it is not reported as
     # the project's last activity.
-    bonus_date = max((c[1] for c in candidates if c[2] != WAYBACK_LABEL), default=None)
+    bonus_date = max((c[1] for c in candidates if c[3] != WAYBACK), default=None)
 
     score = float(best_score)
 
@@ -2963,7 +3006,7 @@ def score_project(project):
         # Said out loud because it is a fact about the wall, not about the
         # project, and a reader comparing two low scores should be able to tell
         # "we could not look" from "we looked and found nothing".
-        if any(c[2] == WAYBACK_LABEL for c in candidates):
+        if any(c[3] == WAYBACK for c in candidates):
             why.append("The site is behind a bot check that refused both an ordinary "
                        "request and a browser, so the score rests on the Wayback "
                        "Machine's record of the page changing")
@@ -3066,7 +3109,7 @@ def score_project(project):
     # The sitemap and the archive are the weakest dates there are. A score that
     # rests on them alone can read Active, but it is not the confidence the
     # Status field asks for, so Status is left alone.
-    if status == "Active" and all(c[2] in (SITEMAP_LABEL, WAYBACK_LABEL)
+    if status == "Active" and all(c[3] in (SITEMAP, WAYBACK)
                                   for c in candidates if c[0] > 0):
         status = None
 

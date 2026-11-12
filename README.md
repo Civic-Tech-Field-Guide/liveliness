@@ -119,9 +119,11 @@ The scorer checks two more sources only when nothing else gave a score: no code,
 
 The scorer skips both when the site did not respond, the page has moved or the address is an archive snapshot, because they would date something that is no longer the project. For a site behind a bot check, it asks only the Wayback Machine, because the same bot check blocks the sitemap.
 
-**Sitemap.** The scorer reads the sitemaps named in the site's `robots.txt` first, then `/sitemap.xml`, `/sitemap_index.xml` and `/wp-sitemap.xml`, and uses the first one with a date. It follows a sitemap index two levels down and reads up to four child sitemaps from each, newest first. The whole search stops at eight requests or 25 seconds.
+**Sitemap.** The scorer reads the sitemaps named in the site's `robots.txt` first, then `/sitemap.xml`, `/sitemap_index.xml` and `/wp-sitemap.xml`, and uses the first one with a date. It follows a sitemap index two levels down and reads up to four child sitemaps from each, newest first, and judges all the entries under one index together. The whole search stops at eight requests or 25 seconds.
 
-When the address points to a section of a site, only entries at or under that address count. The lab's own pages date a lab's page on a university site, not the university's news. The scorer skips entries on another site, because `robots.txt` can name someone else's sitemap. It keeps entries on a host the site redirects to, so it can read a site that moved under its new name.
+When the address points to a section of a site, only entries at or under that address count. The lab's own pages date a lab's page on a university site, not the university's news. The scorer skips entries on another site, because `robots.txt` can name someone else's sitemap. It keeps entries on a host the site's own address redirects to, so it can read a site that moved under its new name. Where `robots.txt` itself redirects doesn't count.
+
+The scorer skips the sitemap when a query string or a `#/` route picks out the page, such as `project.php?id=12`, because it can't tell which entry is that page. It asks the Wayback Machine about the address with its query.
 
 The newest `lastmod` counts like a date the page gives for itself, but only if it is 18 months old or newer. At 18 months it scores 40, and the 5 points for a responding site bring it to 45, the bottom of Likely Active. An older `lastmod` counts for nothing, and the scorer asks the Wayback Machine instead.
 
@@ -129,8 +131,8 @@ Four kinds of `lastmod` don't count:
 
 - A date of today or yesterday, because a sitemap generated on each request stamps every entry with the request time.
 - A day that carries at least 80% of five or more entries when another entry is newer. That day is an old rebuild of the site, so the scorer sets those entries aside and dates the site from the rest. If the rebuild is the newest thing in the file, it is a recent deploy and counts.
-- Five or more entries that all carry the same date or timestamp, because a generator wrote the file in one pass.
-- A timestamp to the second that covers at least 80% of five or more entries, because a generator wrote those entries in one pass. The scorer sets them aside even when they are the newest, and dates the site from the rest.
+- Five or more entries that all carry the same date, or the same time to the minute, because a generator wrote the file in one pass.
+- One time, to the minute, on at least 80% of five or more entries, because a generator wrote those entries in one pass. The scorer sets them aside even when they are the newest, and dates the site from the rest.
 
 **Wayback Machine.** The Internet Archive stores a hash of each capture, so a new hash means the content changed. The scorer asks for the 40 most recent successful captures of the address, drops any under 1,500 bytes, keeps the newest 20 and needs at least six. Small captures are usually the archive hitting a bot check or a redirect, and the archive later getting past the check is not the site changing.
 
