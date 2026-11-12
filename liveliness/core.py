@@ -96,6 +96,9 @@ class _LimitedResponse:
 
 
 _PAGE_CACHE = {}
+# Where each cached page's request ended up, after redirects. The last resorts
+# read it to know where a homepage moved: that host is the site too.
+_PAGE_FINAL = {}
 
 
 def get_page_cached(url):
@@ -111,11 +114,25 @@ def get_page_cached(url):
         return _PAGE_CACHE[url]
     try:
         r = get_limited(url)
+        if r.url:
+            _PAGE_FINAL[url] = r.url
         val = (r.text, dict(r.headers)) if r.status_code == 200 else (None, None)
     except Exception:
         val = (None, None)
     _PAGE_CACHE[url] = val
     return val
+
+
+def landed_url(url):
+    """
+    Where the listed page's own request ended up, or url itself. Only an
+    http(s) address that is not an archive counts as where the site moved.
+    """
+    final = _PAGE_FINAL.get(url)
+    if (not final or not final.lower().startswith(("http://", "https://"))
+            or is_archive_host(final)):
+        return url
+    return final
 
 
 def get_limited(url, timeout=10, headers=None, deadline_s=None):
@@ -1885,6 +1902,20 @@ def _within(loc, prefix):
 _TRACKING_PARAM = re.compile(r"^(?:utm_\w+|fbclid|gclid|mc_cid|mc_eid|ref|source)$", re.I)
 
 
+def _names_section(loc, section):
+    """
+    True when a child sitemap's address names the listing's section: as a
+    whole path segment, or as a whole word of its file name split on - _ and .
+    "lab" matches /lab/sitemap.xml and lab-sitemap.xml, not collaboration.xml.
+    """
+    if not section:
+        return False
+    segments = [x for x in (urlparse(loc).path or "").lower().split("/") if x]
+    if section in segments[:-1]:
+        return True
+    return bool(segments) and section in re.split(r"[-_.]", segments[-1])
+
+
 def _hash_route(p):
     """True for a #/ or #!/ route: the page is built in the browser from it."""
     return p.fragment.startswith(("/", "!/"))
@@ -1994,7 +2025,9 @@ def sitemap_newest_date(entries, now, prefix="", hosts=None):
     # file, and the rest date the site.
     if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
         stamp, count = Counter(m for _, m in dated).most_common(1)[0]
-        if count >= SITEMAP_BUILD_SHARE * len(dated) and stamp[0] == "p":
+        # A bare date shared that widely is the same thing at a coarser grain:
+        # a generator that writes only the day.
+        if count >= SITEMAP_BUILD_SHARE * len(dated):
             dated = [(d, m) for d, m in dated if m != stamp]
     dated = [d for d, _ in dated]
     if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
@@ -2009,20 +2042,19 @@ def sitemap_newest_date(entries, now, prefix="", hosts=None):
 
 
 def _robots_sitemaps(root, deadline):
-    """(sitemap urls named in robots.txt, host the request landed on)."""
+    """The sitemap urls robots.txt names, at most three."""
     remaining = deadline - time.monotonic()
     if remaining <= 1:
-        return [], None
+        return []
     try:
         r = get_limited(root + "/robots.txt", timeout=min(SITEMAP_TIMEOUT_S, remaining),
                         deadline_s=remaining)
     except Exception:
-        return [], None
+        return []
     if r.status_code != 200:
-        return [], None
+        return []
     found = re.findall(r"(?im)^\s*sitemap\s*:\s*(\S+)", r.text[:200_000])
-    return ([u for u in found if u.lower().startswith(("http://", "https://"))][:3],
-            _site_host(r.url) or None)
+    return [u for u in found if u.lower().startswith(("http://", "https://"))][:3]
 
 
 def sitemap_date(url, now):
@@ -2051,9 +2083,13 @@ def sitemap_date(url, now):
     hosts = {_site_host(url)}
     deadline = time.monotonic() + SITEMAP_DEADLINE_S
     fetches = 1
-    # Where robots.txt itself redirects is not evidence of the site's host: a
-    # parked or hijacked robots.txt can land anywhere.
-    tops, _ = _robots_sitemaps(root, deadline)
+    # Where the homepage itself redirected is the site under its new name, and
+    # is trusted before any sitemap is read. Where robots.txt redirects is not:
+    # a parked or hijacked robots.txt can land anywhere.
+    landed = landed_url(url)
+    if landed != url:
+        hosts.add(_site_host(landed))
+    tops = _robots_sitemaps(root, deadline)
     tops += [root + s for s in SITEMAP_PATHS if root + s not in tops]
 
     # Final addresses already read, so one index reached under two names, such
@@ -2095,8 +2131,7 @@ def sitemap_date(url, now):
             # a university site reads the lab's sitemap, then the newest-stamped.
             children = sorted(
                 (e for e in entries if e[0] not in visited),
-                key=lambda e: (bool(section) and section in (urlparse(e[0]).path or "").lower(),
-                               e[1] or ""),
+                key=lambda e: (_names_section(e[0], section), e[1] or ""),
                 reverse=True)
             for loc, _ in children[:SITEMAP_CHILDREN]:
                 if fetches >= SITEMAP_MAX_FETCHES:
@@ -2260,11 +2295,12 @@ def wayback_change_date(url, now=None):
     listing down on the strength of when the archive happened to look.
     """
     now = now or datetime.now(timezone.utc)
-    p = urlparse(url)
-    if not p.netloc:
+    if _hash_route(urlparse(url)):
+        # A #/ route is built in the browser, so every capture is the same shell.
         return None
-    # A #/ route is built in the browser, so every capture is the same shell.
-    if _hash_route(p):
+    # The page the site now serves, where the listed address redirects to it.
+    p = urlparse(landed_url(url))
+    if not p.netloc or _hash_route(p):
         return None
     target = p.netloc + (p.path or "/")
     if _identifying_query(p.query):
@@ -2728,6 +2764,7 @@ def score_project(project):
     name   = project.name
     now    = datetime.now(timezone.utc)
     _PAGE_CACHE.clear()
+    _PAGE_FINAL.clear()
 
     _log(f"\n  [{name}]")
     website_unreadable = bool(project.website) and not _parses(project.website)
@@ -2869,7 +2906,6 @@ def score_project(project):
     page_unreadable = False
     page_closed, page_closed_phrase = False, None
     pending_adjudication = None
-    adjudication_words = None
 
     # A site behind a bot wall answered 403 or 429, which is the wall talking
     # and says nothing about the project. Roughly two thirds of them serve their
@@ -2940,10 +2976,15 @@ def score_project(project):
             elif not page_unreadable and not page_signals and not news:
                 # The wording check found nothing and neither did any date. This
                 # is the narrow band the rules cannot settle, so it is the only
-                # band worth queueing for a reading, once the last resorts below
-                # have had their turn. The run does not wait for a reading: it
-                # scores this record as though none existed.
-                adjudication_words = rendered if rendered is not None else readable
+                # band worth queueing for a reading. The run does not wait for
+                # one: it scores this record as though no reading existed. The
+                # sitemap and the archive, asked below, neither add to this band
+                # nor take from it: a homepage rewritten to announce a closure
+                # is exactly the change the archive sees.
+                words = rendered if rendered is not None else readable
+                pending_adjudication = adjudication_candidate(name, website_url, words)
+                if pending_adjudication:
+                    _log(f"    page     → nothing the rules can settle; queued for reading")
             if page_unreadable:
                 _log(f"    page     → still unread after rendering")
             else:
@@ -2984,15 +3025,6 @@ def score_project(project):
                 candidates.append((wayback_recency_score(changed, now), changed,
                                    WAYBACK_LABEL, WAYBACK))
                 _log(f"    wayback  → content last changed {changed:%Y-%m-%d}")
-
-    # Only the project's own evidence settles the page. A sitemap or archive
-    # date does not: a homepage rewritten to announce a closure is exactly the
-    # change the archive sees, so the page is still worth reading.
-    if adjudication_words is not None and not any(
-            c[0] > 0 and c[3] == OWN for c in candidates):
-        pending_adjudication = adjudication_candidate(name, website_url, adjudication_words)
-        if pending_adjudication:
-            _log(f"    page     → nothing the rules can settle; queued for reading")
 
     best_score = max((c[0] for c in candidates), default=0)
     best_date  = max((c[1] for c in candidates), default=None)
@@ -3047,6 +3079,9 @@ def score_project(project):
         score  = min(score + bonus, 100)
         why.append(_adjustment(
             "Website is responding" if bonus == WEBSITE_ALIVE_BONUS
+            else "Website is responding; the only recent sign is the Wayback Machine's "
+                 "record of the page changing"
+            if any(c[3] == WAYBACK and c[0] > 0 for c in candidates)
             else "Website is responding, but nothing dated and recent was found to go "
                  "with it",
             bonus, score - before))
