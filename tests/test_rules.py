@@ -783,7 +783,7 @@ def test_small_captures_are_dropped_before_the_window_is_cut(monkeypatch):
     # Twenty bot-check captures at the end must not crowd out the real page.
     from liveliness import core
     real = [["2026%02d01000000" % m, "A" if m < 6 else "B", "9000"] for m in range(1, 10)]
-    walls = [["202610%02d000000" % d, "W%d" % d, "400"] for d in range(1, 21)]
+    walls = [["202610%02d000000" % d, "W%d" % d, "350"] for d in range(1, 21)]
     monkeypatch.setattr(core, "_cdx", lambda params: real + walls)
     dt = core.wayback_change_date("https://x.org/", _now())
     assert (dt.year, dt.month) == (2026, 6)
@@ -920,14 +920,99 @@ def test_where_robots_txt_redirects_is_not_the_site(monkeypatch):
     assert core.sitemap_date("https://x.org/", _now()) is None
 
 
-def test_a_page_dated_by_a_last_resort_is_not_queued_for_reading(monkeypatch):
+def test_a_page_dated_only_by_a_last_resort_is_still_read(monkeypatch):
+    # A homepage rewritten to announce a closure is exactly what the archive
+    # sees change, so a last-resort date does not settle the page.
     from datetime import datetime, timedelta, timezone
     from liveliness import core
     _undated_live_site(monkeypatch, core)
     monkeypatch.setattr(core, "ADJUDICATE", True)
     when = datetime.now(timezone.utc) - timedelta(days=40)
     monkeypatch.setattr(core, "sitemap_date", lambda u, now: (when, "https://x.org/sitemap.xml"))
-    assert core.score_project(Project(name="x", website="https://x.org/"))["adjudication"] is None
+    assert core.score_project(Project(name="x", website="https://x.org/"))["adjudication"] is not None
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None: when)
+    assert core.score_project(Project(name="x", website="https://x.org/"))["adjudication"] is not None
     monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
     monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None: None)
     assert core.score_project(Project(name="x", website="https://x.org/"))["adjudication"] is not None
+
+
+
+# ── Sixth review ──────────────────────────────────────────────────────────────
+
+def test_a_listing_with_a_dated_page_is_not_read(monkeypatch):
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    monkeypatch.setattr(core, "ADJUDICATE", True)
+    monkeypatch.setattr(core, "latest_blog_date", lambda *a: _now())
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None: None)
+    assert core.score_project(Project(name="x", website="https://x.org/"))["adjudication"] is None
+
+
+def test_revisits_and_small_real_pages_count_as_captures(monkeypatch):
+    # The shape the archive returns for info.cern.ch: 200 captures of about
+    # 800 bytes, and warc/revisit rows with status "-" carrying the same digest.
+    from liveliness import core
+    rows = [["2026%02d01000000" % m, "A", "800", "200", "text/html"] for m in range(1, 6)]
+    rows += [["20260601000000", "B", "810", "200", "text/html"]]
+    rows += [["2026%02d01000000" % m, "B", "550", "-", "warc/revisit"] for m in range(7, 11)]
+    rows += [["20261005000000", "W", "300", "200", "text/html"]]
+    asked = []
+    monkeypatch.setattr(core, "_cdx", lambda params: asked.append(params) or rows)
+    dt = core.wayback_change_date("https://info.cern.ch/", _now())
+    assert dt is not None and (dt.year, dt.month) == (2026, 6)
+    assert "statuscode:200" not in str(asked[0].get("filter"))
+
+
+def test_a_hash_route_skips_both_last_resorts(monkeypatch):
+    from liveliness import core
+    seen = _fake_web(monkeypatch, core, {})
+    asked = []
+    monkeypatch.setattr(core, "_cdx", lambda params: asked.append(params) or None)
+    assert core.sitemap_date("https://x.org/#!/projects/12", _now()) is None
+    assert core.wayback_change_date("https://x.org/#/projects/12", _now()) is None
+    assert core.wayback_change_date("https://x.org/#!/projects/12", _now()) is None
+    assert seen == [] and asked == []
+
+
+def test_a_generator_pass_spread_over_minutes_is_one_pass():
+    from datetime import datetime, timedelta, timezone
+    from liveliness import core
+    start = datetime(2026, 6, 1, 12, 0, 0)
+    entries = [("https://x.org/%d" % i, (start + timedelta(seconds=50 * i)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+               for i in range(50)]
+    entries.append(("https://x.org/about", "2024-01-01"))
+    assert core.sitemap_newest_date(entries, _now()) == datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+
+def test_a_capture_with_a_bad_timestamp_is_skipped():
+    from liveliness import core
+    rows = [["2026%02d01000000" % m, "A"] for m in range(1, 6)] + [["garbage", "A"], ["20260901000000", "B"]]
+    dt, settled = core.wayback_change_from_captures(rows, _now())
+    assert settled and (dt.year, dt.month) == (2026, 9)
+
+
+def test_one_index_under_two_names_is_read_once(monkeypatch):
+    from liveliness import core
+    index = ('<sitemapindex><sitemap><loc>https://x.org/a.xml</loc></sitemap></sitemapindex>')
+    child = '<urlset><url><loc>https://x.org/p</loc></url></urlset>'
+    seen = _fake_web(monkeypatch, core, {
+        "https://x.org/sitemap.xml": (index, "https://x.org/sitemap_index.xml"),
+        "https://x.org/sitemap_index.xml": index,
+        "https://x.org/a.xml": child})
+    core.sitemap_date("https://x.org/", _now())
+    assert seen.count("https://x.org/a.xml") == 1
+
+
+def test_index_children_matching_the_listing_section_come_first(monkeypatch):
+    from liveliness import core
+    others = "".join('<sitemap><loc>https://x.org/news-%d.xml</loc><lastmod>2026-10-0%d</lastmod></sitemap>'
+                     % (i, i + 1) for i in range(5))
+    index = ('<sitemapindex>' + others +
+             '<sitemap><loc>https://x.org/labs-sitemap.xml</loc><lastmod>2025-01-01</lastmod></sitemap>'
+             '</sitemapindex>')
+    seen = _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": index})
+    core.sitemap_date("https://x.org/labs/civic/", _now())
+    assert "https://x.org/labs-sitemap.xml" in seen

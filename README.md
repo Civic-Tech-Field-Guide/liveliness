@@ -123,7 +123,7 @@ The scorer skips both when the site did not respond, the page has moved or the a
 
 When the address points to a section of a site, only entries at or under that address count. The lab's own pages date a lab's page on a university site, not the university's news. The scorer skips entries on another site, because `robots.txt` can name someone else's sitemap. It keeps entries on a host the site's own address redirects to, so it can read a site that moved under its new name. Where `robots.txt` itself redirects doesn't count.
 
-The scorer skips the sitemap when a query string or a `#/` route picks out the page, such as `project.php?id=12`, because it can't tell which entry is that page. It asks the Wayback Machine about the address with its query.
+The scorer skips the sitemap when a query string picks out the page, such as `project.php?id=12`, because it can't tell which entry is that page. It asks the Wayback Machine about the address with its query. For a `#/` or `#!/` route it skips both sources, because the browser builds that page and the archive only sees the shell.
 
 The newest `lastmod` counts like a date the page gives for itself, but only if it is 18 months old or newer. At 18 months it scores 40, and the 5 points for a responding site bring it to 45, the bottom of Likely Active. An older `lastmod` counts for nothing, and the scorer asks the Wayback Machine instead.
 
@@ -131,10 +131,10 @@ Four kinds of `lastmod` don't count:
 
 - A date of today or yesterday, because a sitemap generated on each request stamps every entry with the request time.
 - A day that carries at least 80% of five or more entries when another entry is newer. That day is an old rebuild of the site, so the scorer sets those entries aside and dates the site from the rest. If the rebuild is the newest thing in the file, it is a recent deploy and counts.
-- Five or more entries that all carry the same date, or the same time to the minute, because a generator wrote the file in one pass.
-- One time, to the minute, on at least 80% of five or more entries, because a generator wrote those entries in one pass. The scorer sets them aside even when they are the newest, and dates the site from the rest.
+- Five or more entries that all carry the same date, or times from one run, because a generator wrote the file in one pass. Times on the same day count as one run while each is within two minutes of the one before.
+- One run of times on at least 80% of five or more entries, because a generator wrote those entries in one pass. The scorer sets them aside even when they are the newest, and dates the site from the rest.
 
-**Wayback Machine.** The Internet Archive stores a hash of each capture, so a new hash means the content changed. The scorer asks for the 40 most recent successful captures of the address, drops any under 1,500 bytes, keeps the newest 20 and needs at least six. Small captures are usually the archive hitting a bot check or a redirect, and the archive later getting past the check is not the site changing.
+**Wayback Machine.** The Internet Archive stores a hash of each capture, so a new hash means the content changed. The scorer asks for the 40 most recent captures of the address, keeps the newest 20 and needs at least six. It counts revisits, where the archive saw the same content again. It drops captures that aren't HTML and archived records under 400 bytes, which are usually the archive hitting a bot check or a redirect. The archive later getting past the check is not the site changing.
 
 The first capture of the current content dates the last change. The scorer uses it only if both that capture and the one before it fall within the last year. The archive's capture schedule is too weak evidence to call a project stopped, and after a long gap between captures the change could have come at any point in it. The scorer ignores a page that didn't change across those captures, because its last change came before them.
 
@@ -227,7 +227,7 @@ Each line shows the points actually applied, so the lines add up to the total. W
 
 Some pages need reading, not keyword matching. A conference closes registration because it is about to happen, and a consultation closes because it is over. Both pages say "closed".
 
-When the scorer can read a page but finds no date, no news page and no closure, it sets `adjudication` to the project's name, address and up to 6,000 characters of page text. The score doesn't change. The Field Guide sends these pages to a language model, and a person must approve any reading that would mark a project inactive. `eval/README.md` describes the testing.
+When the scorer can read a page but finds no date from the project itself, no news page and no closure, it sets `adjudication` to the project's name, address and up to 6,000 characters of page text. A sitemap or Wayback Machine date doesn't count as a date here, because a homepage rewritten to announce a closure is exactly the change the archive sees. The score doesn't change. The Field Guide sends these pages to a language model, and a person must approve any reading that would mark a project inactive. `eval/README.md` describes the testing.
 
 The evaluation set is not published because it contains copies of other people's web pages.
 

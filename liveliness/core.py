@@ -1885,6 +1885,11 @@ def _within(loc, prefix):
 _TRACKING_PARAM = re.compile(r"^(?:utm_\w+|fbclid|gclid|mc_cid|mc_eid|ref|source)$", re.I)
 
 
+def _hash_route(p):
+    """True for a #/ or #!/ route: the page is built in the browser from it."""
+    return p.fragment.startswith(("/", "!/"))
+
+
 def _identifying_query(query):
     """True when a query string picks out the page, not just tags the visit."""
     return any(not _TRACKING_PARAM.match(k)
@@ -1911,14 +1916,45 @@ def _same_site(loc, hosts):
 OWN, SITEMAP, WAYBACK = "own", "sitemap", "wayback"
 
 
-def _build_stamp(mod):
+SITEMAP_PASS_GAP_S = 120   # stamps this close on one day are one generator pass
+
+
+def _stamp_time(mod):
+    """A lastmod's date and time to the second, or None for a bare date."""
+    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::(\d{2}))?", mod)
+    if not m:
+        return None
+    try:
+        return datetime.strptime("%s %s:%s" % (m.group(1), m.group(2), m.group(3) or "00"),
+                                 "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _build_passes(mods):
     """
-    A lastmod reduced to what one generator pass shares: (day, "HH:MM") for a
-    stamp with a time, (day, None) for a bare date. A pass that takes a few
-    seconds writes stamps that differ in the seconds or milliseconds only.
+    One key per lastmod, shared by the stamps one generator pass wrote: ("d",
+    day) for a bare date, ("p", n) for a time. Times on one day join a pass
+    while each falls within SITEMAP_PASS_GAP_S of the one before, so a pass
+    that takes minutes to write a large site is still one pass.
     """
-    m = re.search(r"(\d{4}-\d{2}-\d{2})(?:[T ](\d{2}:\d{2}))?", mod)
-    return (m.group(1), m.group(2)) if m else (mod.strip(), None)
+    keys = [None] * len(mods)
+    timed = []
+    for i, mod in enumerate(mods):
+        t = _stamp_time(mod)
+        if t is None:
+            m = re.search(r"\d{4}-\d{2}-\d{2}", mod)
+            keys[i] = ("d", m.group(0) if m else mod.strip())
+        else:
+            timed.append((t, i))
+    timed.sort()
+    n, prev = -1, None
+    for t, i in timed:
+        if prev is None or t.date() != prev.date() or (t - prev).total_seconds() > SITEMAP_PASS_GAP_S:
+            n += 1
+        keys[i] = ("p", n)
+        prev = t
+    return keys
 
 
 def sitemap_newest_date(entries, now, prefix="", hosts=None):
@@ -1935,30 +1971,30 @@ def sitemap_newest_date(entries, now, prefix="", hosts=None):
     that day is the build and is set aside, and the entries left over, usually
     the pages somebody edited by hand, date the site.
     """
-    dated, raws = [], []
+    kept = []
     for loc, mod in entries:
         if not mod or not _same_site(loc, hosts) or not _within(loc, prefix):
             continue
         dt = _parse_date_loose(mod, now)
         if dt is not None:
-            stamp = _build_stamp(mod)
-            raws.append(stamp)
-            # The server's clock, not a change: dropped before anything else
-            # is judged, so one such entry cannot make a real build look old.
-            if (now - dt).days >= LAST_MODIFIED_MIN_AGE_DAYS:
-                dated.append((dt, stamp))
+            kept.append((dt, mod))
+    raws = _build_passes([m for _, m in kept])
+    # The server's clock, not a change: dropped before anything else is
+    # judged, so one such entry cannot make a real build look old.
+    dated = [(dt, key) for (dt, _), key in zip(kept, raws)
+             if (now - dt).days >= LAST_MODIFIED_MIN_AGE_DAYS]
     # A generator that writes one stamp on every entry, a date or a time, says
     # when the file was built, not when anything changed. Below five entries
     # one sitting of edits can look the same, so it is believed.
     if len(raws) >= SITEMAP_STAMP_MIN_COUNT and len(set(raws)) == 1:
         return None
-    # Pages edited by hand do not share a time to the minute. When one such
-    # stamp covers SITEMAP_BUILD_SHARE of the entries, a generator wrote them in
-    # one pass, so they are set aside even when the pass is the newest thing in
-    # the file, and the rest date the site.
+    # Pages edited by hand are not stamped minutes apart in one run. When one
+    # pass covers SITEMAP_BUILD_SHARE of the entries, a generator wrote them,
+    # so they are set aside even when the pass is the newest thing in the
+    # file, and the rest date the site.
     if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
         stamp, count = Counter(m for _, m in dated).most_common(1)[0]
-        if count >= SITEMAP_BUILD_SHARE * len(dated) and stamp[1] is not None:
+        if count >= SITEMAP_BUILD_SHARE * len(dated) and stamp[0] == "p":
             dated = [(d, m) for d, m in dated if m != stamp]
     dated = [d for d, _ in dated]
     if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
@@ -2008,7 +2044,7 @@ def sitemap_date(url, now):
         return None
     # A page named by its query or by a #/ route shares its path with every
     # other page of that kind, so no sitemap entry can be told to be this one.
-    if _identifying_query(p.query) or p.fragment.startswith("/"):
+    if _identifying_query(p.query) or _hash_route(p):
         return None
     root = "%s://%s" % (p.scheme or "https", p.netloc)
     prefix = _path_prefix(url)
@@ -2020,14 +2056,23 @@ def sitemap_date(url, now):
     tops, _ = _robots_sitemaps(root, deadline)
     tops += [root + s for s in SITEMAP_PATHS if root + s not in tops]
 
+    # Final addresses already read, so one index reached under two names, such
+    # as /sitemap.xml redirecting to /sitemap_index.xml, is read once.
+    visited = set()
+    section = prefix.strip("/").split("/")[0].lower()
     for top in tops:
         if fetches >= SITEMAP_MAX_FETCHES:
             break
+        if top in visited:
+            continue
         fetches += 1
         got = _sitemap_body(top, deadline)
         if got is None:
             continue
         text, final = got
+        if final in visited:
+            continue
+        visited.update((top, final))
         # Where the site's own address redirected is the site too. A sitemap
         # robots.txt names on some other host does not make that host this site.
         if _site_host(top) in hosts:
@@ -2046,14 +2091,20 @@ def sitemap_date(url, now):
                 continue
             if depth >= SITEMAP_MAX_DEPTH:
                 continue
-            # Newest-stamped children first, when the index says which those are.
-            children = sorted(entries, key=lambda e: e[1] or "", reverse=True)
+            # Children named for the listing's section first, so a lab's page on
+            # a university site reads the lab's sitemap, then the newest-stamped.
+            children = sorted(
+                (e for e in entries if e[0] not in visited),
+                key=lambda e: (bool(section) and section in (urlparse(e[0]).path or "").lower(),
+                               e[1] or ""),
+                reverse=True)
             for loc, _ in children[:SITEMAP_CHILDREN]:
                 if fetches >= SITEMAP_MAX_FETCHES:
                     break
                 fetches += 1
                 child = _sitemap_body(loc, deadline)
-                if child is not None:
+                if child is not None and child[1] not in visited:
+                    visited.update((loc, child[1]))
                     queue.append((child[1], child[0], depth + 1))
         dt = sitemap_newest_date([e for _, ents in gathered for e in ents], now, prefix, hosts)
         if dt and (now - dt).days <= SITEMAP_MAX_AGE_DAYS:
@@ -2088,7 +2139,7 @@ WAYBACK_FETCH_ROWS    = 40      # asked for, so bot checks can be dropped first
 WAYBACK_MIN_CAPTURES  = 6       # real captures needed before the hashes mean anything
 WAYBACK_TIMEOUTS_TO_PAUSE = 2
 WAYBACK_MAX_CHURN     = 0.5     # share of captures with a new hash that means churn
-WAYBACK_MIN_LENGTH    = 1500    # bytes; smaller captures are bot checks and stubs
+WAYBACK_MIN_LENGTH    = 400     # record bytes; smaller 200s are bot checks and stubs
 WAYBACK_RECENT_CHANGE_DAYS  = 365
 WAYBACK_MIN_INTERVAL_S = 4
 WAYBACK_PAUSE_S       = 600
@@ -2156,6 +2207,7 @@ def wayback_change_from_captures(rows, now=None):
     previous capture is older than WAYBACK_RECENT_CHANGE_DAYS. The change could
     have come at any point after that capture, so its date says nothing recent.
     """
+    rows = [r for r in rows if _cdx_time(r[0]) is not None]
     if len(rows) < 2:
         return None, True
     digests = [r[1] for r in rows]
@@ -2177,7 +2229,21 @@ def wayback_change_from_captures(rows, now=None):
 
 
 def _real_capture(row):
-    """False for a capture too small to be the page: a bot check or a redirect stub."""
+    """
+    False for a row that is not a capture of the page. Rows are (timestamp,
+    digest, length, statuscode, mimetype), any of the last three possibly
+    missing. A revisit (status "-") is the archive seeing the same content
+    again and keeps its digest, so it counts. A 200 that is not HTML, or
+    whose compressed record is tiny, is a bot check or a stub. length is the
+    size of the archived record, not of the page, so only a very small one is
+    dropped: a plain page like info.cern.ch stores about 800 bytes.
+    """
+    status = row[3] if len(row) > 3 else "200"
+    mime = (row[4] if len(row) > 4 else "text/html") or ""
+    if status == "-":
+        return True
+    if status != "200" or (mime and mime not in ("text/html", "warc/revisit")):
+        return False
     try:
         return int(row[2]) >= WAYBACK_MIN_LENGTH
     except (IndexError, ValueError, TypeError):
@@ -2197,10 +2263,15 @@ def wayback_change_date(url, now=None):
     p = urlparse(url)
     if not p.netloc:
         return None
+    # A #/ route is built in the browser, so every capture is the same shell.
+    if _hash_route(p):
+        return None
     target = p.netloc + (p.path or "/")
     if _identifying_query(p.query):
         target += "?" + p.query
-    base = {"url": target, "fl": "timestamp,digest,length", "filter": "statuscode:200"}
+    # Revisits (status "-") are kept: they say the content had not changed.
+    base = {"url": target, "fl": "timestamp,digest,length,statuscode,mimetype",
+            "filter": "!statuscode:[345].."}
     rows = _cdx(dict(base, limit=-WAYBACK_FETCH_ROWS, fastLatest="true"))
     if not rows:
         return None
@@ -2770,7 +2841,10 @@ def score_project(project):
     # ── Combine all signals ───────────────────────────────────────────────────
     # Every dated signal becomes a (points, date, label, source) candidate.
     # source is OWN for evidence the project left, or SITEMAP or WAYBACK for
-    # the two last resorts, which count toward the score and nothing else. The score is
+    # the two last resorts. A sitemap date is the site dating itself, so it
+    # earns the website bonus and is reported as the last activity date. A
+    # Wayback change does neither, and neither last resort sets Status Active
+    # or settles the page against a reading. The score is
     # the single best of these and never their sum, which is exactly the part a
     # reader cannot infer from the final number, so the breakdown has to name
     # which signal won and show the others as also-rans.
@@ -2911,10 +2985,11 @@ def score_project(project):
                                    WAYBACK_LABEL, WAYBACK))
                 _log(f"    wayback  → content last changed {changed:%Y-%m-%d}")
 
-    # A page a last resort dated is settled, so a reading of it would only
-    # repeat what the scorer already used.
+    # Only the project's own evidence settles the page. A sitemap or archive
+    # date does not: a homepage rewritten to announce a closure is exactly the
+    # change the archive sees, so the page is still worth reading.
     if adjudication_words is not None and not any(
-            c[0] > 0 and c[3] in (SITEMAP, WAYBACK) for c in candidates):
+            c[0] > 0 and c[3] == OWN for c in candidates):
         pending_adjudication = adjudication_candidate(name, website_url, adjudication_words)
         if pending_adjudication:
             _log(f"    page     → nothing the rules can settle; queued for reading")
