@@ -33,7 +33,7 @@ result = score_project(Project(
 
 result["score"]               # 0 to 100, or None when there was nothing to go on
 result["activity_status"]     # Active | Likely Active | Possibly Inactive | Inactive | Unknown
-result["last_activity_date"]  # the most recent date the project itself left, ISO 8601, or None
+result["last_activity_date"]  # the most recent date from the project itself, ISO 8601, or None
 result["status"]              # Active | Inactive | N/A, only where it is unambiguous
 result["breakdown"]           # the reasoning, line by line
 result["discovered_url"]      # the homepage, when the website given was an article about the project
@@ -74,6 +74,8 @@ When the rules find no date and no statement that a project has ended, the score
 | News pages | Up to two of the site's own blog, news, updates or events pages, found through the homepage's links. The newest dated item counts like a blog post. |
 | Social | Last post date for YouTube, Bluesky, Medium, Reddit, Substack, and Mastodon or other fediverse accounts. X, LinkedIn, Facebook, Instagram, TikTok and Signal don't expose post dates, so they are only checked for being reachable. |
 | The page itself | Dates the homepage gives for itself, a recent copyright year in the footer, and any statement that the project has closed. |
+| Sitemap | Only when nothing above has a date: the newest change the site's sitemap lists for the address. |
+| Wayback Machine | Only when the sitemap has no date either: the last time the Internet Archive saw the page change. |
 
 ### Website
 
@@ -113,17 +115,35 @@ About one in ten reachable sites sends an empty shell and builds its text in the
 
 ### Last resorts
 
-The scorer asks two more sources only when nothing else scored: no code, feed, recent social post, news page or date on the page. Both cost extra requests and both are weaker than any of those, so a listing with a dated signal never reaches them. Both can lift a listing out of Unknown and neither can push one down. The scorer skips both for a site that did not respond, a page that has moved and an archive snapshot, since what they would date is no longer the project. For a site behind a bot check it asks only the archive, because the check that refused the homepage refuses the sitemap too.
+The scorer checks two more sources only when nothing else gave a score: no code, feed, recent social post, news page or date on the page. Both cost extra requests and both are weaker evidence, so a listing with a dated signal never reaches them. Both can raise a listing out of Unknown, and neither can lower a score.
 
-**Sitemap.** The scorer reads the sitemaps that the site's `robots.txt` names first, then `/sitemap.xml`, `/sitemap_index.xml` and `/wp-sitemap.xml`, and uses the first one that yields a date. It follows a sitemap index two levels down and reads at most four child sitemaps from each, newest first, with at most eight requests and 25 seconds of wall-clock time for the whole search. When the listed address points into a section of a site, only entries at or under that address count, so the lab's own pages date a lab's page on a university site, not the university's news. The scorer skips entries on another site, since a `robots.txt` can name a sitemap that belongs to a different site entirely, and keeps entries on a host the site redirects to, so it reads a site that moved under its new name. The newest `lastmod` counts like a date the page states about itself, and only when it is eighteen months old or newer: at that age it scores 40, and the 5 a responding site earns brings it to 45, the foot of Likely Active. An older `lastmod` counts for nothing, and the scorer asks the archive instead.
+The scorer skips both when the site did not respond, the page has moved or the address is an archive snapshot, because they would date something that is no longer the project. For a site behind a bot check, it asks only the Wayback Machine, because the same bot check blocks the sitemap.
 
-The scorer ignores three kinds of `lastmod`. One from today or yesterday is the server's clock, by the same reasoning as the `Last-Modified` header, since a sitemap built for each request stamps every entry with the time of the request. When one day carries at least 80% of five or more entries and some other entry is newer, that day is an earlier build of the site, so the scorer sets those entries aside and dates the site from the rest. A build that is the newest thing in the file is a recent deploy and counts. And when five or more entries all carry one timestamp to the second, a generator wrote the file in one pass, so none of them count.
+**Sitemap.** The scorer reads the sitemaps named in the site's `robots.txt` first, then `/sitemap.xml`, `/sitemap_index.xml` and `/wp-sitemap.xml`, and uses the first one with a date. It follows a sitemap index two levels down and reads up to four child sitemaps from each, newest first. The whole search stops at eight requests or 25 seconds.
 
-**Wayback Machine.** The Internet Archive records a hash of every capture it makes, so a change in the hash is a change in the content. The scorer asks for the 40 most recent successful captures of the listed address, drops those under 1,500 bytes, keeps the newest 20, and needs at least six. The small captures are the archive meeting a bot check or a redirect, and the archive getting past the check later is not the site changing. The first capture of the current content dates the last change the archive saw. The scorer uses that date only when it falls within the last year, because when the archive happened to look is too weak to show that a project has stopped. It ignores a page whose content did not change across those captures, since its change lies somewhere before them.
+When the address points to a section of a site, only entries at or under that address count. The lab's own pages date a lab's page on a university site, not the university's news. The scorer skips entries on another site, because `robots.txt` can name someone else's sitemap. It keeps entries on a host the site redirects to, so it can read a site that moved under its new name.
 
-Many pages change their hash on every capture, from a rotating banner, a form token or a clock, and for those the last change is only the last capture. When over half of the recent captures differ from the one before, or the page flips back to an earlier version, the scorer does not use the archive. Nor does it ask the archive about a page built in the browser, whose script bundle gets a new name on every deploy, or about a page whose footer copyright from this year or last already sets the floor the archive's score would match.
+The newest `lastmod` counts like a date the page gives for itself, but only if it is 18 months old or newer. At 18 months it scores 40, and the 5 points for a responding site bring it to 45, the bottom of Likely Active. An older `lastmod` counts for nothing, and the scorer asks the Wayback Machine instead.
 
-The archive reaches sites that turn this checker away at a bot check, which is the main reason to ask it. It is weak evidence: a change within a year scores 45, the same as the footer copyright. It never earns the bonus for a responding website, and the scorer does not report it as the project's last activity date, because it records when the archive looked rather than anything the project did. The archive limits clients to about 15 requests a minute, so the scorer spaces requests four seconds apart. It leaves the archive alone for ten minutes after a refusal, a server error, or two requests in a row that get no answer within ten seconds, and treats each of those as no evidence.
+Three kinds of `lastmod` don't count:
+
+- A date of today or yesterday, because a sitemap generated on each request stamps every entry with the request time.
+- A day that carries at least 80% of five or more entries when another entry is newer. That day is an old rebuild of the site, so the scorer sets those entries aside and dates the site from the rest. If the rebuild is the newest thing in the file, it is a recent deploy and counts.
+- Five or more entries that all carry the same timestamp to the second, because a generator wrote them in one pass.
+
+**Wayback Machine.** The Internet Archive stores a hash of each capture, so a new hash means the content changed. The scorer asks for the 40 most recent successful captures of the address, drops any under 1,500 bytes, keeps the newest 20 and needs at least six. Small captures are usually the archive hitting a bot check or a redirect, and the archive later getting past the check is not the site changing.
+
+The first capture of the current content dates the last change. The scorer uses it only if it falls within the last year, because the archive's capture schedule is too weak evidence to call a project stopped. A page that didn't change across those captures is ignored, because its last change came before them.
+
+The scorer doesn't use the archive when:
+
+- Over half the recent captures differ from the one before, or the page flips back to an earlier version. A rotating banner, a form token or a clock changes those pages on every capture.
+- The page builds its text in the browser, because its script file gets a new name on every deploy.
+- A footer copyright from this year or last already sets the same floor.
+
+The archive is the main way to reach sites that block this checker. It is weak evidence: a change within a year scores 45, the same as a recent footer copyright. It never earns the points for a responding website, and the scorer doesn't report it as the last activity date, because it records when the archive looked, not anything the project did.
+
+The archive allows about 15 requests a minute, so the scorer waits four seconds between requests. After a refusal, a server error, or two requests in a row with no answer within ten seconds, it leaves the archive alone for ten minutes and counts those as no evidence.
 
 ### Dates
 
@@ -147,14 +167,14 @@ Each dated signal gets points by age. The best single signal sets the base score
 | 5 years or less | 15 | 10 (not sitemap) | 0 | 0 |
 | Older | 5 | 3 (not sitemap) | 0 | 0 |
 
-A date the page gives for itself scores lower than a commit, because content systems update `dateModified` when a template changes and hand-written "last updated" lines go stale. It scores higher than a social post because it comes from the project's own site. An archived GitHub repository counts for at most 15.
+A date the page gives for itself scores lower than a commit, because content systems update `dateModified` when a template changes and hand-written "last updated" lines go stale. It scores higher than a social post because it comes from the project's own site. A sitemap `lastmod` is the site giving the same kind of date in another file, so it scores the same, up to 18 months old. A Wayback Machine change within a year scores 45, the same floor as a recent footer copyright, because both show that someone is keeping the page up. An archived GitHub repository counts for at most 15.
 
 The scorer then adjusts the base score in this order, keeping it between 0 and 100:
 
 1. **Issue resolution.** Closing or merging at least half of recent issue traffic adds 5. Closing none subtracts 5. Anything in between changes nothing. Archived repositories are skipped.
 2. **Website.** One of these applies:
    - The address is an archive snapshot and the original doesn't answer: capped at 10.
-   - The site responds: plus 15 if the newest dated signal is within a year, plus 5 if it is older or there is none.
+   - The site responds: plus 15 if the newest dated signal is within a year, plus 5 if it is older or there is none. A Wayback Machine change doesn't count as a dated signal here.
    - The listed page has moved but the site still answers: minus 15.
    - The address no longer exists: minus 50.
    - The site did not respond: minus 50.
@@ -174,7 +194,7 @@ The floors at 45 and 60 only raise scores. They never lower a higher one.
 
 ### Unknown
 
-When the scorer finds no dates, and no closure, recent launch, recent copyright or archive snapshot, the result is Unknown and `score` is `None`. A website that loads only shows the address still works, so it isn't scored on its own. A site that doesn't respond is scored, not Unknown.
+When the scorer finds no dates, including in the sitemap and the Wayback Machine, and no closure, recent launch, recent copyright or archive snapshot, the result is Unknown and `score` is `None`. A website that loads only shows the address still works, so it isn't scored on its own. A site that doesn't respond is scored, not Unknown.
 
 ### Status
 
