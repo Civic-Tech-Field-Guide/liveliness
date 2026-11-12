@@ -815,3 +815,56 @@ def test_one_slow_answer_does_not_pause_the_archive(monkeypatch):
     assert core._wayback_paused_till > 0.0
     assert core._cdx({"url": "z.org/"}) is None
     assert len(calls) == 2
+
+
+# ── Fourth review ─────────────────────────────────────────────────────────────
+
+def test_a_change_after_a_long_gap_in_captures_is_not_dated_recent():
+    # The archive did not look for years, so the change could have come any
+    # time in that gap.
+    from liveliness import core
+    rows = [["2016%02d01000000" % m, "A"] for m in range(1, 10)] + [["20260901000000", "B"]]
+    assert core.wayback_change_from_captures(rows, _now()) == (None, True)
+    near = [["2026%02d01000000" % m, "A"] for m in range(1, 8)] + [["20260901000000", "B"]]
+    dt, settled = core.wayback_change_from_captures(near, _now())
+    assert settled and (dt.year, dt.month) == (2026, 9)
+
+
+def test_one_date_on_every_sitemap_entry_is_a_build():
+    from liveliness import core
+    entries = [("https://x.org/%d" % i, "2026-06-01") for i in range(50)]
+    assert core.sitemap_newest_date(entries, _now()) is None
+
+
+def test_a_build_stamp_on_nearly_every_entry_is_set_aside_even_when_newest():
+    from datetime import datetime, timezone
+    from liveliness import core
+    entries = [("https://x.org/%d" % i, "2026-06-01T12:00:00Z") for i in range(50)]
+    entries.append(("https://x.org/about", "2024-01-01"))
+    assert core.sitemap_newest_date(entries, _now()) == datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+
+def test_a_sitemap_date_alone_does_not_set_status_active(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    when = datetime.now(timezone.utc) - timedelta(days=60)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now: (when, "https://x.org/sitemap.xml"))
+    r = core.score_project(Project(name="x", website="https://x.org/"))
+    assert r["score"] == 85 and r["activity_status"] == "Active"
+    assert r["status"] is None
+
+
+def test_an_article_whose_homepage_is_walled_says_it_rests_on_the_archive(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    monkeypatch.setattr(core, "classify_url", lambda u: "article")
+    monkeypatch.setattr(core, "find_homepage_in_article", lambda u: "https://x.org/")
+    monkeypatch.setattr(core, "probe_site", lambda u: (None, False, "blocked"))
+    monkeypatch.setattr(core, "render_page_text", lambda u: None)
+    monkeypatch.setattr(core, "wayback_change_date",
+                        lambda u, now=None: datetime.now(timezone.utc) - timedelta(days=100))
+    r = core.score_project(Project(name="x", website="https://news.example/story"))
+    assert "no homepage could be found" not in r["breakdown"]
+    assert "rests on the Wayback Machine" in r["breakdown"]

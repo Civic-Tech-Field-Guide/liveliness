@@ -1921,13 +1921,22 @@ def sitemap_newest_date(entries, now, prefix="", hosts=None):
             # The server's clock, not a change: dropped before anything else
             # is judged, so one such entry cannot make a real build look old.
             if (now - dt).days >= LAST_MODIFIED_MIN_AGE_DAYS:
-                dated.append(dt)
-    # Pages edited by hand do not share a timestamp to the second. A sitemap
-    # whose every entry does was written in one pass by a generator. Below five
-    # entries one sitting of edits can look the same, so it is believed.
-    if (len(raws) >= SITEMAP_STAMP_MIN_COUNT and len(set(raws)) == 1
-            and re.search(r"T\d\d:\d\d:\d\d", raws[0])):
+                dated.append((dt, mod))
+    # A generator that writes one stamp on every entry, a date or a time, says
+    # when the file was built, not when anything changed. Below five entries
+    # one sitting of edits can look the same, so it is believed.
+    if len(raws) >= SITEMAP_STAMP_MIN_COUNT and len(set(raws)) == 1:
         return None
+    # Pages edited by hand do not share a timestamp to the second. When one such
+    # stamp covers SITEMAP_BUILD_SHARE of the entries, a generator wrote them in
+    # one pass, so they are set aside even when the pass is the newest thing in
+    # the file, and the rest date the site.
+    if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
+        stamp, count = Counter(m for _, m in dated).most_common(1)[0]
+        if (count >= SITEMAP_BUILD_SHARE * len(dated)
+                and re.search(r"T\d\d:\d\d:\d\d", stamp)):
+            dated = [(d, m) for d, m in dated if m != stamp]
+    dated = [d for d, _ in dated]
     if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
         day, count = Counter(d.date() for d in dated).most_common(1)[0]
         # Only an older build is set aside. When the build is the newest thing
@@ -2105,15 +2114,17 @@ def _cdx_time(ts):
         return None
 
 
-def wayback_change_from_captures(rows):
+def wayback_change_from_captures(rows, now=None):
     """
     The first capture of the newest content, from (timestamp, digest) rows in
     time order, as (datetime | None, settled). settled is False when the newest
     content already held at the start of the rows, so its first capture is
     earlier than anything here, and the rows can only bound it.
 
-    None for the date when the rows cannot date a change: too few of them, or
-    a page whose hash changes on most captures.
+    None for the date when the rows cannot date a change: too few of them, a
+    page whose hash changes on most captures, or, given `now`, a change whose
+    previous capture is older than WAYBACK_RECENT_CHANGE_DAYS. The change could
+    have come at any point after that capture, so its date says nothing recent.
     """
     if len(rows) < 2:
         return None, True
@@ -2128,6 +2139,9 @@ def wayback_change_from_captures(rows):
     # The current content also showing up earlier, apart from its own run, is
     # a page flipping between versions rather than one that changed.
     if newest in digests[:i]:
+        return None, True
+    if (now is not None and i > 0
+            and (now - _cdx_time(rows[i - 1][0])).days > WAYBACK_RECENT_CHANGE_DAYS):
         return None, True
     return _cdx_time(rows[i][0]), i > 0
 
@@ -2162,9 +2176,10 @@ def wayback_change_date(url, now=None):
     if len(rows) < WAYBACK_MIN_CAPTURES:
         _log("    wayback  → too few captures of the page to judge")
         return None
-    dt, settled = wayback_change_from_captures(rows)
+    dt, settled = wayback_change_from_captures(rows, now)
     if dt is None:
-        _log("    wayback  → too few captures, or the page changes on every capture")
+        _log("    wayback  → too few captures, the page changes on every capture, "
+             "or the archive did not look for a year before the change")
         return None
     if not settled:
         # Unchanged across the whole window: the change is somewhere before
@@ -2839,6 +2854,8 @@ def score_project(project):
     # checked, is not the project's site, so neither is asked about either.
     # Behind a wall only the archive is asked, since the wall that refused the
     # homepage refuses the sitemap too.
+    fresh_copyright = (page_copyright_year is not None
+                       and page_copyright_year >= now.year - 1)
     project_site = url_class == "homepage" or (url_class == "article" and discovered_url)
     # A stale social post scores 0 and is no reason to stop looking.
     if (not any(c[0] > 0 for c in candidates) and website_url and project_site
@@ -2851,11 +2868,9 @@ def score_project(project):
                 _log(f"    sitemap  → newest change {found[0]:%Y-%m-%d} in {found[1][:70]}")
             else:
                 _log(f"    sitemap  → nothing dated and believable")
-        fresh_footer = (page_copyright_year is not None
-                        and page_copyright_year >= now.year - 1)
         # A page built by script changes its bundle's name on every deploy, so
         # the archive sees a new hash whether or not anything on it changed.
-        if not found and not fresh_footer and not js_shell:
+        if not found and not fresh_copyright and not js_shell:
             changed = wayback_change_date(website_url, now)
             if changed:
                 candidates.append((wayback_recency_score(changed, now), changed, WAYBACK_LABEL))
@@ -2935,7 +2950,7 @@ def score_project(project):
         before = score
         score  = max(score - 50, 0)  # strong signal of death
         why.append(_adjustment("Website did not respond", -50, score - before))
-    elif url_class == "article":
+    elif url_class == "article" and not discovered_url:
         why.append("The listed address is an article about the project rather than the "
                    "project itself, and no homepage could be found from it")
     elif website_unreadable:
@@ -2979,8 +2994,6 @@ def score_project(project):
         why.append("The website answers, but its text is built in the browser, so "
                    "nothing on the page could be read without running it")
 
-    fresh_copyright = (page_copyright_year is not None
-                       and page_copyright_year >= now.year - 1)
     if fresh_copyright:
         before = score
         score  = max(score, COPYRIGHT_FRESH_FLOOR)
@@ -3050,6 +3063,12 @@ def score_project(project):
     score  = round(score, 1)
     activity_status = "Unknown" if unknown else score_to_activity_status(score)
     status          = None      if unknown else score_to_status(score)
+    # The sitemap and the archive are the weakest dates there are. A score that
+    # rests on them alone can read Active, but it is not the confidence the
+    # Status field asks for, so Status is left alone.
+    if status == "Active" and all(c[2] in (SITEMAP_LABEL, WAYBACK_LABEL)
+                                  for c in candidates if c[0] > 0):
+        status = None
 
     # A finished piece of work is N/A, and it outranks anything the signals say.
     # A report does not stop being a report because the site hosting it went

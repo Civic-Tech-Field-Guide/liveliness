@@ -125,15 +125,16 @@ When the address points to a section of a site, only entries at or under that ad
 
 The newest `lastmod` counts like a date the page gives for itself, but only if it is 18 months old or newer. At 18 months it scores 40, and the 5 points for a responding site bring it to 45, the bottom of Likely Active. An older `lastmod` counts for nothing, and the scorer asks the Wayback Machine instead.
 
-Three kinds of `lastmod` don't count:
+Four kinds of `lastmod` don't count:
 
 - A date of today or yesterday, because a sitemap generated on each request stamps every entry with the request time.
 - A day that carries at least 80% of five or more entries when another entry is newer. That day is an old rebuild of the site, so the scorer sets those entries aside and dates the site from the rest. If the rebuild is the newest thing in the file, it is a recent deploy and counts.
-- Five or more entries that all carry the same timestamp to the second, because a generator wrote them in one pass.
+- Five or more entries that all carry the same date or timestamp, because a generator wrote the file in one pass.
+- A timestamp to the second that covers at least 80% of five or more entries, because a generator wrote those entries in one pass. The scorer sets them aside even when they are the newest, and dates the site from the rest.
 
 **Wayback Machine.** The Internet Archive stores a hash of each capture, so a new hash means the content changed. The scorer asks for the 40 most recent successful captures of the address, drops any under 1,500 bytes, keeps the newest 20 and needs at least six. Small captures are usually the archive hitting a bot check or a redirect, and the archive later getting past the check is not the site changing.
 
-The first capture of the current content dates the last change. The scorer uses it only if it falls within the last year, because the archive's capture schedule is too weak evidence to call a project stopped. A page that didn't change across those captures is ignored, because its last change came before them.
+The first capture of the current content dates the last change. The scorer uses it only if both that capture and the one before it fall within the last year. The archive's capture schedule is too weak evidence to call a project stopped, and after a long gap between captures the change could have come at any point in it. The scorer ignores a page that didn't change across those captures, because its last change came before them.
 
 The scorer doesn't use the archive when:
 
@@ -200,7 +201,7 @@ When the scorer finds no dates, including in the sitemap and the Wayback Machine
 
 `status` is stricter than `activity_status` and is only set at the ends of the range:
 
-- **Active** at 70 and above.
+- **Active** at 70 and above, unless the only dates come from the sitemap or the Wayback Machine. Those are too weak to set Status, so it stays empty.
 - **Inactive** below 20, and only when the site can't be reached or the page says the project has closed. The scorer checks an unreachable site once more, after five seconds. A moved page never counts as unreachable. A low score on a site that still loads leaves `status` empty, because an old guide or dataset is still usable while it's online.
 - **N/A** for a finished piece of work, such as a report or a book. A project that also has an ongoing type, such as an organization that published a report, is scored normally.
 - Empty otherwise.
