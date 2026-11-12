@@ -226,7 +226,7 @@ Each line shows the points actually applied, so the lines add up to the total. W
 
 Some pages need reading, not keyword matching. A conference closes registration because it is about to happen, and a consultation closes because it is over. Both pages say "closed".
 
-When the scorer can read a page but finds no date from the project itself, no news page and no closure, it sets `adjudication` to the project's name, address and up to 6,000 characters of page text. A sitemap or Wayback Machine date doesn't count as a date here, because a homepage rewritten to announce a closure is exactly the change the archive sees. The score doesn't change. The Field Guide sends these pages to a language model, and a person must approve any reading that would mark a project inactive. `eval/README.md` describes the testing.
+When the scorer can read a page but finds no date, no news page and no closure, it sets `adjudication` to the project's name, address and up to 6,000 characters of page text. A sitemap or Wayback Machine date doesn't change this, because a homepage rewritten to announce a closure is exactly the change the archive sees. The score doesn't change. The Field Guide sends these pages to a language model, and a person must approve any reading that would mark a project inactive. `eval/README.md` describes the testing.
 
 The evaluation set is not published because it contains copies of other people's web pages.
 
