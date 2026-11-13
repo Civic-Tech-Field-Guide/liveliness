@@ -496,6 +496,10 @@ def test_an_archive_answering_with_a_server_error_is_paused(monkeypatch):
     monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
     monkeypatch.setattr(core, "_wayback_last_call", 0.0)
     monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    monkeypatch.setattr(core, "_wayback_timeouts", 0)
+    # Two server errors in a row pause it; one does not.
+    assert core._cdx({"url": "x.org/"}) is None
+    assert core._wayback_paused_till == 0.0
     assert core._cdx({"url": "x.org/"}) is None
     assert core._wayback_paused_till > core.time.monotonic()
 
@@ -1801,7 +1805,9 @@ def test_a_failed_year_query_does_not_pause_the_archive(monkeypatch):
     assert len(asked) == 2
 
 
-def test_a_request_we_cut_short_does_not_count_toward_the_pause(monkeypatch):
+def test_a_request_sized_to_the_time_left_counts_toward_the_pause(monkeypatch):
+    # A request given all the time that remained had a fair chance, however
+    # short that time was, so its failure counts.
     import time
     import requests
     from liveliness import core
@@ -1812,9 +1818,9 @@ def test_a_request_we_cut_short_does_not_count_toward_the_pause(monkeypatch):
     def get(url, timeout=None, **k):
         raise requests.Timeout("slow")
     monkeypatch.setattr(core.SESSION, "get", get)
-    for _ in range(3):
+    for _ in range(2):
         core._cdx({"url": "x.org/"}, deadline=time.monotonic() + 8)
-    assert core._wayback_paused_till == 0.0
+    assert core._wayback_paused_till > time.monotonic()
 
 
 def test_the_sitemap_gets_at_most_fifteen_seconds_of_the_last_resorts(monkeypatch):
@@ -2485,3 +2491,86 @@ def test_score_project_works_out_the_parked_verdict_once(monkeypatch):
     monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: None)
     core.score_project(Project(name="x", website="https://x.org/"))
     assert len(calls) == 1
+
+
+# ── Review of 6a1305a ─────────────────────────────────────────────────────────
+
+def test_a_walled_site_whose_rendered_text_is_parked_is_not_dated(monkeypatch):
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    monkeypatch.setattr(core, "probe_site", lambda u: (None, False, "blocked"))
+    monkeypatch.setattr(core, "render_page_text", lambda u: "This domain is for sale. " * 12)
+    def never(*a, **k):
+        raise AssertionError("a parked page behind a wall is not dated")
+    monkeypatch.setattr(core, "sitemap_date", never)
+    monkeypatch.setattr(core, "wayback_change_date", never)
+    core.score_project(Project(name="x", website="https://x.org/"))
+
+
+def test_midnight_stamps_are_day_grain():
+    from liveliness import core
+    ten = [("https://x.org/%d" % i, "2026-06-01T00:00:00+00:00") for i in range(10)]
+    assert _newest_date(ten) is not None
+    twenty = [("https://x.org/%d" % i, "2026-06-01T00:00:00Z") for i in range(20)]
+    assert _newest_date(twenty) is None
+
+
+def test_one_server_error_counts_once_toward_the_pause(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
+    monkeypatch.setattr(core, "_wayback_last_call", 0.0)
+    monkeypatch.setattr(core, "_wayback_timeouts", 0)
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    monkeypatch.setattr(core, "get_within", lambda url, *a, **k: _FakeResponse(url, "", 503))
+    core._cdx({"url": "x.org/"})
+    assert core._wayback_paused_till == 0.0
+    core._cdx({"url": "y.org/"})
+    assert core._wayback_paused_till > core.time.monotonic()
+    # A 429 pauses at once.
+    monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
+    monkeypatch.setattr(core, "_wayback_timeouts", 0)
+    monkeypatch.setattr(core, "get_within", lambda url, *a, **k: _FakeResponse(url, "", 429))
+    core._cdx({"url": "z.org/"})
+    assert core._wayback_paused_till > core.time.monotonic()
+
+
+def test_error_paths_are_whole_segments():
+    from liveliness import core
+    url = "https://x.org/projects/foo"
+    assert core._removed_page(url, "https://x.org/404.html")
+    assert core._removed_page(url, "https://x.org/notfound")
+    assert not core._removed_page(url, "https://x.org/errors-and-omissions/foo")
+    assert not core._removed_page(url, "https://x.org/projects/errorless")
+    assert not core._removed_page(url, "https://x.org/error-reporting/foo")
+    assert not core._removed_page(url, "https://x.org/404-campaign")
+
+
+def test_the_parked_verdict_is_not_worked_out_when_the_last_resorts_will_not_run(monkeypatch):
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    monkeypatch.setattr(core, "latest_blog_date", lambda *a: _now())
+    def never(*a, **k):
+        raise AssertionError("not needed")
+    monkeypatch.setattr(core, "_looks_parked", never)
+    core.score_project(Project(name="x", website="https://x.org/"))
+
+
+def test_each_sitemap_location_is_parsed_once(monkeypatch):
+    from liveliness import core
+    calls = []
+    real = core.urlparse
+    monkeypatch.setattr(core, "urlparse", lambda u, *a, **k: calls.append(u) or real(u, *a, **k))
+    entries = [("https://x.org/p%d" % i, "2026-06-%02d" % (i + 1)) for i in range(10)]
+    core.sitemap_newest_entry(entries, _now(), "/p", {"x.org"})
+    assert len(calls) <= 10
+
+
+def test_a_lastmod_with_an_offset_dates_the_utc_day():
+    from datetime import datetime, timezone
+    from liveliness import core
+    assert core._lastmod_date("2026-09-01T23:30:00-05:00", _now()) == datetime(2026, 9, 2, tzinfo=timezone.utc)
+
+
+def test_one_trust_function():
+    from liveliness import core
+    assert not hasattr(core, "_move_trust")

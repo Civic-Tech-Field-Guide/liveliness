@@ -175,7 +175,7 @@ _PARKED_TEXT = re.compile(
 PARKED_MAX_WORDS = 150   # visible words; a parking page has fewer
 
 
-def _looks_parked(listed, new, html=None):
+def _looks_parked(listed, new, html=None, text=None):
     """
     True when a move lands on a parking or for-sale page: a known parking
     host, or a short page with the wording. `html` is the page the move
@@ -188,37 +188,12 @@ def _looks_parked(listed, new, html=None):
         html = (_PAGE_CACHE.get(listed) or (None, None))[0] or ""
     # A parking page is a few lines. A real homepage that says "tickets for
     # sale" somewhere is not one, so the wording counts only on a short page.
-    visible = readable_page(html[:200_000], text_cap=200_000)["text"]
+    visible = text if text is not None else readable_page(html[:200_000], text_cap=200_000)["text"]
     if len(visible.split()) >= PARKED_MAX_WORDS:
         return False
     # The title and og: names are in the head, outside the visible text.
     titles = " ".join(_page_titles(html))
     return bool(_PARKED_TEXT.search(titles + " " + visible))
-
-
-def _move_trust(listed, new, check_parked=True, start=None):
-    """
-    Why a move to `new` is trusted: "same" (the same host, www or not, any
-    scheme), "apex" (from the front page of the apex into one of its own
-    subdomains), or None.
-    `start` is where the move began, when that is not the listed address
-    itself, as for a sitemap address that redirected. With check_parked, a
-    landed page that reads as parked, or a parking host, is never trusted,
-    even on the same site; a sitemap redirect passes check_parked=False and
-    checks the sitemap it landed on itself.
-    """
-    sh, nh = _site_host(start or listed), _site_host(new)
-    # The parked check reads the page the move landed on: the cached homepage
-    # fetch followed the redirect, so its text is the landed page's. A lapsed
-    # domain whose www serves a parking "lander" is the same host and still
-    # rejected; a real homepage that merely moved to https or www is not.
-    if check_parked and _looks_parked(listed, new):
-        return None
-    if sh == nh:
-        return "same"
-    if sh == _registrable(sh) and nh.endswith("." + sh) and _path_prefix(listed) == "":
-        return "apex"
-    return None
 
 
 def trusted_move(listed, new, check_parked=True, start=None):
@@ -235,11 +210,24 @@ def trusted_move(listed, new, check_parked=True, start=None):
     page there is titled, since a funder's or a parent's page can carry the
     project's name. A move that lands on a parking or for-sale page is never
     trusted (check_parked), on the same site or off it.
+
+    `start` is where the move began, when that is not the listed address
+    itself, as for a sitemap address that redirected; a sitemap redirect
+    passes check_parked=False and checks the sitemap it landed on itself.
     """
-    return _move_trust(listed, new, check_parked, start) is not None
+    sh, nh = _site_host(start or listed), _site_host(new)
+    # The parked check reads the page the move landed on: the cached homepage
+    # fetch followed the redirect, so its text is the landed page's.
+    if check_parked and _looks_parked(listed, new):
+        return False
+    if sh == nh:
+        return True
+    return sh == _registrable(sh) and nh.endswith("." + sh) and _path_prefix(listed) == ""
 
 
-_ERROR_PATH = re.compile(r"(?:^|/)(?:404|410|not[-_]?found|page[-_]?not[-_]?found|error)(?:[./_-]|$)", re.I)
+# A path segment that is an error page in its own right, whole: /404,
+# /not-found.html, /error. Not /error-reporting or /404-campaign.
+_ERROR_SEGMENT = re.compile(r"^(?:error|404|410|not-found|page-not-found|notfound)(?:\.(?:html?|php))?$", re.I)
 
 
 def _removed_page(url, final):
@@ -254,7 +242,7 @@ def _removed_page(url, final):
     landed = (urlparse(final).path or "").rstrip("/").lower()
     if _path_prefix(final) == "" or listed.startswith(landed + "/"):
         return True
-    return bool(_ERROR_PATH.search(landed))
+    return any(_ERROR_SEGMENT.match(seg) for seg in landed.split("/") if seg)
 
 
 def landed_url(url, parked=None):
@@ -269,7 +257,7 @@ def landed_url(url, parked=None):
         return url
     if parked:
         return url
-    if _move_trust(url, final, check_parked=parked is None) is None:
+    if not trusted_move(url, final, check_parked=parked is None):
         return url
     # A deep page that now goes up its own path, to a front page or to an
     # error page was removed. Where it lands is the organization's, not the
@@ -2196,9 +2184,14 @@ def _path_prefix(url):
 
 def _within(loc, prefix):
     """True when a sitemap entry sits at or under the listed path."""
+    return _path_within(urlparse(loc).path or "", prefix)
+
+
+def _path_within(path, prefix):
+    """True when a path sits at or under the listed path, case aside."""
     if not prefix:
         return True
-    path = (urlparse(loc).path or "").rstrip("/").lower()
+    path = path.rstrip("/").lower()
     prefix = prefix.lower()
     return path == prefix or path.startswith(prefix + "/")
 
@@ -2241,9 +2234,12 @@ def _identifying_query(query):
 
 def _site_host(url):
     """A URL's host without a leading www or a default port, for telling one site from another."""
-    host = (_netloc(url) or "").lower()
-    host = re.sub(r":(?:80|443)$", "", host)
-    return host.removeprefix("www.")
+    return _host_key(_netloc(url) or "")
+
+
+def _host_key(netloc):
+    """A netloc without a leading www or a default port, lower case."""
+    return re.sub(r":(?:80|443)$", "", netloc.lower()).removeprefix("www.")
 
 
 def _same_site(loc, hosts):
@@ -2303,6 +2299,9 @@ def _stamp_time(mod):
     return t
 
 
+_MIDNIGHT = re.compile(r"T00:00(?::00(?:\.0+)?)?\s*(?:Z|[+-]\d{2}:?\d{2})?\s*$", re.I)
+
+
 def _build_passes(mods):
     """
     One key per lastmod, shared by the stamps one generator pass wrote: ("d",
@@ -2315,7 +2314,9 @@ def _build_passes(mods):
     keys = [None] * len(mods)
     timed = []
     for i, mod in enumerate(mods):
-        t = _stamp_time(mod)
+        # A time of exactly midnight, with any offset, is a date written as a
+        # timestamp: as coarse as a bare date, and judged like one.
+        t = None if _MIDNIGHT.search(mod) else _stamp_time(mod)
         if t is None:
             m = re.search(r"\d{4}-\d{2}-\d{2}", mod)
             keys[i] = ("d", m.group(0) if m else mod.strip())
@@ -2357,7 +2358,12 @@ def _lastmod_date(mod, now):
     raw = mod.strip()
     d = None
     try:
-        d = datetime.fromisoformat(raw.replace("Z", "+00:00")).date()
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        # The day in UTC, the same as _stamp_time, so a stamp late in the
+        # evening west of Greenwich dates the next day there too.
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc)
+        d = parsed.date()
     except ValueError:
         m = re.match(r"(\d{4})-(\d{2})-(\d{2})", raw)
         if m:
@@ -2400,13 +2406,20 @@ def sitemap_newest_entry(entries, now, prefix="", hosts=None, builds=None, deadl
             break
         loc, mod = entry[0], entry[1]
         src = entry[2] if len(entry) > 2 else None
-        if not mod or not _same_site(loc, hosts):
+        if not mod:
             continue
-        if _CMS_DEFAULT_PAGE.search(urlparse(loc).path or ""):
+        try:
+            parts = urlparse(loc)
+        except ValueError:
+            continue
+        if hosts and _host_key(parts.netloc) not in hosts:
+            continue
+        path = parts.path or ""
+        if _CMS_DEFAULT_PAGE.search(path):
             continue
         dt = _lastmod_date(mod, now)
         if dt is not None:
-            kept.append((dt, mod, src, _within(loc, prefix)))
+            kept.append((dt, mod, src, _path_within(path, prefix)))
     if not any(ins for _, _, _, ins in kept):
         return None
     raws = _build_passes([m for _, m, _, _ in kept])
@@ -2648,7 +2661,7 @@ _wayback_paused_till = 0.0
 _wayback_timeouts    = 0
 
 
-def _wayback_get(url, params=None, deadline=None, count_failure=True, count_always=False):
+def _wayback_get(url, params=None, deadline=None, count_failure=True):
     """
     One request to the archive, spaced and paused as the archive asks, or None
     when it could not be asked or refused.
@@ -2683,11 +2696,14 @@ def _wayback_get(url, params=None, deadline=None, count_failure=True, count_alwa
     remaining = None if deadline is None else deadline - time.monotonic()
     timeout = WAYBACK_TIMEOUT_S if remaining is None else request_caps(remaining, WAYBACK_TIMEOUT_S)
     # A failure counts toward the pause when the request had a fair chance:
-    # WAYBACK_PAUSE_MIN_TIMEOUT_S, or 80% of the timeout it could have had in
-    # the time left, or it is the last query the caller will try.
-    full_timeout = (count_always or timeout >= WAYBACK_PAUSE_MIN_TIMEOUT_S
-                    or (remaining is not None
-                        and timeout >= 0.8 * min(WAYBACK_TIMEOUT_S, remaining)))
+    # a timeout of at least WAYBACK_PAUSE_MIN_TIMEOUT_S, or at least 80% of the
+    # time that remained. get_within gives a request sized to a deadline its
+    # three timeouts and its body deadline out of all the time left, so such a
+    # request had that time; only one squeezed by a deadline already passed
+    # would not.
+    allowed = None if remaining is None else 3 * timeout + body_deadline(remaining, timeout)
+    full_timeout = (timeout >= WAYBACK_PAUSE_MIN_TIMEOUT_S
+                    or (remaining is not None and remaining > 0 and allowed >= 0.8 * remaining))
     if params:
         # doseq, so a list of filters goes out as one filter= each.
         url = url + "?" + urlencode(params, doseq=True)
@@ -2708,10 +2724,18 @@ def _wayback_get(url, params=None, deadline=None, count_failure=True, count_alwa
         return None
     if page and r.status_code != 429:
         return r if r.status_code == 200 else None
-    _wayback_timeouts = 0
-    if r.status_code >= 500 and not count_failure:
+    if r.status_code >= 500:
+        # A server error counts once toward the pause, like a request that got
+        # no answer; it takes two in a row.
+        if count_failure and full_timeout:
+            _wayback_timeouts += 1
+            if _wayback_timeouts >= WAYBACK_TIMEOUTS_TO_PAUSE:
+                _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
+                _wayback_timeouts = 0
+                _log(f"    wayback  → server error twice ({r.status_code}); not asked again for a while")
         return None
-    if r.status_code == 429 or r.status_code >= 500:
+    _wayback_timeouts = 0
+    if r.status_code == 429:
         _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
         _log(f"    wayback  → refused ({r.status_code}); not asked again for a while")
         return None
@@ -2720,10 +2744,9 @@ def _wayback_get(url, params=None, deadline=None, count_failure=True, count_alwa
     return r
 
 
-def _cdx(params, deadline=None, count_failure=True, count_always=False):
+def _cdx(params, deadline=None, count_failure=True):
     """Rows from the CDX API, or None when the archive could not be asked."""
-    r = _wayback_get(WAYBACK_CDX, dict(params, output="json"), deadline, count_failure,
-                     count_always)
+    r = _wayback_get(WAYBACK_CDX, dict(params, output="json"), deadline, count_failure)
     if r is None:
         return None
     # No captures comes back as "[]". An empty body is the archive giving up on
@@ -2980,9 +3003,7 @@ def wayback_change_date(url, now=None, deadline=None, landed=None):
         # A heavily archived page can make the year-long query time out inside
         # the archive. The latest WAYBACK_FALLBACK_DAYS days still date a
         # recent change, though a capture a year back is then out of reach.
-        # The last query for this page: its failure counts toward the pause.
-        rows = _cdx(dict(query, limit=-WAYBACK_FALLBACK_DAYS), deadline=deadline,
-                    count_always=True)
+        rows = _cdx(dict(query, limit=-WAYBACK_FALLBACK_DAYS), deadline=deadline)
         # Sixty days cannot show a capture six months or a year back, so the
         # text comparison, which needs them, is not tried on these rows.
         short_window = True
@@ -3628,6 +3649,7 @@ def score_project(project, budget_s=None):
     blocked_text = None
     js_shell = False
     homepage_html = None
+    homepage_text = None
     if website_url and site_verdict == "blocked" and not is_archived:
         _log(f"    website  → behind a bot check; trying a browser")
         candidate = render_page_text(website_url)
@@ -3657,6 +3679,9 @@ def score_project(project, budget_s=None):
             # the same finding as reading no date off a page, so it is recorded
             # as its own fact rather than left to look like an absence.
             readable = blocked_text or readable_page(page_html)["text"]
+            # The words a visitor sees, rendered past a wall when that is how
+            # they were read, kept for the parked check below.
+            homepage_text = readable
             page_unreadable = len(readable) < MIN_READABLE_PAGE_CHARS
             js_shell = page_unreadable and blocked_text is None
 
@@ -3723,13 +3748,18 @@ def score_project(project, budget_s=None):
                      for c in candidates)
     # A listed homepage that itself reads as parked or for sale is not the
     # project's site, and its sitemap and archive would date the parking page.
-    parked = bool(website_url) and _looks_parked(
-        website_url, _PAGE_FINAL.get(website_url) or website_url, html=homepage_html)
-    if (not recent_own and website_url and project_site and not parked
-            and not page_closed and not is_archived and site_verdict in ("ok", "blocked")
-            # A snapshot address dates the snapshot, not the project, whether
-            # or not the original still answers.
-            and not is_archive_host(raw_url) and not is_archive_host(website_url)):
+    last_resorts = bool(
+        not recent_own and website_url and project_site
+        and not page_closed and not is_archived and site_verdict in ("ok", "blocked")
+        # A snapshot address dates the snapshot, not the project, whether
+        # or not the original still answers.
+        and not is_archive_host(raw_url) and not is_archive_host(website_url))
+    # Worked out only when the last resorts would run, from the words already
+    # read, rendered past a wall included.
+    parked = last_resorts and _looks_parked(
+        website_url, _PAGE_FINAL.get(website_url) or website_url,
+        html=homepage_html, text=homepage_text)
+    if last_resorts and not parked:
         found = None
         # The last resorts get the caller's budget, or LAST_RESORTS_S of their
         # own when the caller gave none, so nothing can run past it unbounded.
