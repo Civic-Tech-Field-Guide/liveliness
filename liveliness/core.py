@@ -25,6 +25,7 @@ it, a YouTube channel is checked for reachability but not for its last upload).
 """
 
 import json
+from html import unescape as html_unescape
 import os
 import re
 import socket
@@ -188,7 +189,7 @@ def _page_titles(url):
     found = re.findall(r"<title[^>]*>([\s\S]*?)</title>", head, re.I)
     found += re.findall(r'<meta[^>]+property=["\']og:(?:site_name|title)["\'][^>]+content=["\']([^"\']*)',
                         head, re.I)
-    return found
+    return [html_unescape(t).strip() for t in found]
 
 
 def _page_names_project(url, name=None):
@@ -271,6 +272,10 @@ def request_caps(remaining, cap):
     the response headers and to each chunk, and the body loop checks its
     deadline only between chunks, so the worst case is three timeouts plus
     the body deadline. Each gets a quarter, and neither exceeds `cap`.
+
+    The stop is approximate: requests applies the timeout to each redirect hop
+    afresh, so a request that follows redirects can run over by about one
+    timeout per extra hop.
     """
     share = max(remaining, 0) / 4
     return min(cap, share), min(cap, share)
@@ -2071,7 +2076,7 @@ def parse_sitemap(text):
         loc = _SITEMAP_LOC_RE.search(m.group(2))
         mod = _SITEMAP_MOD_RE.search(m.group(2))
         if loc:
-            entries.append((loc.group(1).strip(), mod.group(1).strip() if mod else None))
+            entries.append((html_unescape(loc.group(1).strip()), mod.group(1).strip() if mod else None))
     return kind, entries
 
 
@@ -2429,6 +2434,10 @@ def sitemap_date(url, now, deadline=None, landed=None):
                     queue.append((child[1], child[0], depth + 1))
         builds = []
         found = sitemap_newest_entry(gathered, now, prefix, hosts, builds)
+        # A top sitemap that dated anything is the site's list. The other
+        # names usually serve the same list again, so the search ends here,
+        # and an old date is left for the archive to improve on.
+        searched_enough = found is not None or bool(builds)
         recent_build = None
         if builds:
             bdt, bsrc = max(builds, key=lambda b: b[0])
@@ -2446,6 +2455,8 @@ def sitemap_date(url, now, deadline=None, landed=None):
         # and stronger than nothing.
         if recent_build is not None:
             return recent_build
+        if searched_enough:
+            return None
     return None
 
 
@@ -2484,7 +2495,7 @@ _wayback_paused_till = 0.0
 _wayback_timeouts    = 0
 
 
-def _wayback_get(url, params=None, deadline=None):
+def _wayback_get(url, params=None, deadline=None, count_failure=True):
     """
     One request to the archive, spaced and paused as the archive asks, or None
     when it could not be asked or refused.
@@ -2497,7 +2508,12 @@ def _wayback_get(url, params=None, deadline=None):
 
     Both go through get_limited, with the same caps. Given a deadline, the
     request is not started unless the spacing and a two-second request fit,
-    and its timeouts are cut so the worst case ends by the deadline.
+    and its timeouts are cut to fit what is left.
+
+    Only a failure the archive earned counts toward the pause: a request that
+    had the full WAYBACK_TIMEOUT_S and still got no answer, and that the
+    caller does not mean to retry (count_failure). A timeout cut short to fit
+    a deadline says nothing about the archive.
     """
     page = params is None
     global _wayback_last_call, _wayback_paused_till, _wayback_timeouts
@@ -2514,12 +2530,13 @@ def _wayback_get(url, params=None, deadline=None):
         timeout, read_s = WAYBACK_TIMEOUT_S, WAYBACK_TIMEOUT_S
     else:
         timeout, read_s = request_caps(deadline - time.monotonic(), WAYBACK_TIMEOUT_S)
+    full_timeout = timeout >= WAYBACK_TIMEOUT_S
     if params:
         url = url + "?" + urlencode(params)
     try:
         r = get_limited(url, timeout=timeout, deadline_s=read_s)
     except Exception:
-        if page:
+        if page or not count_failure or not full_timeout:
             return None
         # One slow answer is the archive being slow. Two in a row is the
         # archive struggling, and every later record would wait on it too.
@@ -2543,9 +2560,9 @@ def _wayback_get(url, params=None, deadline=None):
     return r
 
 
-def _cdx(params, deadline=None):
+def _cdx(params, deadline=None, count_failure=True):
     """Rows from the CDX API, or None when the archive could not be asked."""
-    r = _wayback_get(WAYBACK_CDX, dict(params, output="json"), deadline)
+    r = _wayback_get(WAYBACK_CDX, dict(params, output="json"), deadline, count_failure)
     if r is None:
         return None
     # No captures comes back as "[]". An empty body is the archive giving up on
@@ -2622,7 +2639,7 @@ def _real_capture(row):
     mime = (row[4] if len(row) > 4 else "text/html") or ""
     if status == "-":
         return True
-    if status != "200" or (mime and mime not in ("text/html", "warc/revisit")):
+    if status != "200" or (mime and mime not in ("text/html", "application/xhtml+xml", "warc/revisit")):
         return False
     try:
         return int(row[2]) >= WAYBACK_MIN_LENGTH
@@ -2788,7 +2805,10 @@ def wayback_change_date(url, now=None, deadline=None, landed=None):
     # many times a day still has captures six months and a year back in reach.
     since = (now - timedelta(days=WAYBACK_LOOKBACK_DAYS)).strftime("%Y%m%d")
     query = dict(base, fastLatest="true", collapse="timestamp:8", **{"from": since})
-    rows = _cdx(dict(query, limit=-(WAYBACK_LOOKBACK_DAYS + 10)), deadline=deadline)
+    # The year-long query failing does not count toward the pause: the shorter
+    # one below is still to be asked.
+    rows = _cdx(dict(query, limit=-(WAYBACK_LOOKBACK_DAYS + 10)), deadline=deadline,
+                count_failure=False)
     if rows is None and time.monotonic() >= _wayback_paused_till:
         # A heavily archived page can make the year-long query time out inside
         # the archive. The latest WAYBACK_FALLBACK_DAYS days still date a
@@ -3261,6 +3281,7 @@ def _without_unparseable_urls(project):
 
 
 LAST_RESORTS_S = 40   # sitemap and archive together, when the caller sets no budget
+SITEMAP_SHARE_S = 15  # the sitemap's part of it at most; the archive keeps the rest
 
 
 def score_project(project, budget_s=None):
@@ -3535,7 +3556,10 @@ def score_project(project, budget_s=None):
         # Where the homepage moved, worked out once for both last resorts.
         landed = landed_url(website_url, name)
         if website_alive is True and site_verdict == "ok":
-            found = sitemap_date(website_url, now, deadline=lr_deadline, landed=landed)
+            # The sitemap gets SITEMAP_SHARE_S of it at most, so the archive's
+            # reads, four seconds apart, still fit in what is left.
+            sitemap_deadline = min(lr_deadline, time.monotonic() + SITEMAP_SHARE_S)
+            found = sitemap_date(website_url, now, deadline=sitemap_deadline, landed=landed)
             if found:
                 if found.build:
                     candidates.append((wayback_recency_score(found[0], now), found[0],

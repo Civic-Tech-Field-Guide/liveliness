@@ -1585,7 +1585,10 @@ def test_without_a_budget_the_last_resorts_get_forty_seconds(monkeypatch):
     before = time.monotonic()
     core.score_project(Project(name="x", website="https://x.org/"))
     assert len(got) == 2 and all(d is not None for d in got)
-    assert all(before + 35 <= d <= time.monotonic() + 41 for d in got)
+    # The sitemap gets at most 15 of the 40 seconds; the archive keeps the rest.
+    sitemap_d, archive_d = got
+    assert sitemap_d <= time.monotonic() + 15.5
+    assert before + 35 <= archive_d <= time.monotonic() + 41
 
 
 def test_a_page_alternating_between_two_versions_dates_nothing(monkeypatch):
@@ -1803,7 +1806,81 @@ def test_an_empty_answer_to_a_heavy_query_is_retried_smaller(monkeypatch):
 
 def test_an_empty_cdx_body_is_not_an_empty_list(monkeypatch):
     from liveliness import core
-    monkeypatch.setattr(core, "_wayback_get", lambda url, params=None, deadline=None: _FakeResponse(url, ""))
+    monkeypatch.setattr(core, "_wayback_get", lambda url, params=None, deadline=None, *a: _FakeResponse(url, ""))
     assert core._cdx({"url": "x.org/"}) is None
-    monkeypatch.setattr(core, "_wayback_get", lambda url, params=None, deadline=None: _FakeResponse(url, "[]"))
+    monkeypatch.setattr(core, "_wayback_get", lambda url, params=None, deadline=None, *a: _FakeResponse(url, "[]"))
     assert core._cdx({"url": "x.org/"}) == []
+
+
+# ── Review of 8a630ae ─────────────────────────────────────────────────────────
+
+def test_a_failed_year_query_does_not_pause_the_archive(monkeypatch):
+    import requests
+    from liveliness import core
+    monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
+    monkeypatch.setattr(core, "_wayback_last_call", 0.0)
+    monkeypatch.setattr(core, "_wayback_timeouts", 1)   # one earlier stall already
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    asked = []
+    def get(url, timeout=None, **k):
+        asked.append(url)
+        raise requests.Timeout("slow")
+    monkeypatch.setattr(core.SESSION, "get", get)
+    core.wayback_change_date("https://x.org/", _now())
+    # The year query failing did not pause the archive, so the fallback ran.
+    assert len(asked) == 2
+
+
+def test_a_request_we_cut_short_does_not_count_toward_the_pause(monkeypatch):
+    import time
+    import requests
+    from liveliness import core
+    monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
+    monkeypatch.setattr(core, "_wayback_last_call", 0.0)
+    monkeypatch.setattr(core, "_wayback_timeouts", 0)
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    def get(url, timeout=None, **k):
+        raise requests.Timeout("slow")
+    monkeypatch.setattr(core.SESSION, "get", get)
+    for _ in range(3):
+        core._cdx({"url": "x.org/"}, deadline=time.monotonic() + 8)
+    assert core._wayback_paused_till == 0.0
+
+
+def test_the_sitemap_gets_at_most_fifteen_seconds_of_the_last_resorts(monkeypatch):
+    import time
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    got = {}
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, deadline, **k: got.__setitem__("s", deadline))
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now, deadline, **k: got.__setitem__("w", deadline))
+    start = time.monotonic()
+    core.score_project(Project(name="x", website="https://x.org/"))
+    assert got["s"] <= time.monotonic() + 15.5 and got["w"] - got["s"] >= 24
+
+
+def test_one_top_sitemap_with_any_date_ends_the_search(monkeypatch):
+    from liveliness import core
+    old = '<urlset><url><loc>https://x.org/a</loc><lastmod>2020-01-01</lastmod></url></urlset>'
+    new = '<urlset><url><loc>https://x.org/b</loc><lastmod>2026-09-01</lastmod></url></urlset>'
+    seen = _fake_web(monkeypatch, core, {"https://x.org/robots.txt": "Sitemap: https://x.org/s1.xml\n",
+                                         "https://x.org/s1.xml": old, "https://x.org/sitemap.xml": new})
+    assert core.sitemap_date("https://x.org/", _now()) is None
+    assert "https://x.org/sitemap.xml" not in seen
+
+
+def test_sitemap_locations_are_xml_unescaped():
+    from liveliness import core
+    text = '<urlset><url><loc>https://x.org/p?a=1&amp;b=2</loc><lastmod>2026-01-01</lastmod></url></urlset>'
+    assert core.parse_sitemap(text)[1] == [("https://x.org/p?a=1&b=2", "2026-01-01")]
+
+
+def test_titles_are_html_unescaped(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Caf&eacute; Civique &amp; Co</title>", {})})
+    assert core._page_titles("https://x.org/") == ["Café Civique & Co"]
+
+
+def test_xhtml_captures_count_as_pages():
+    from liveliness import core
+    assert core._real_capture(["20260101000000", "A", "9000", "200", "application/xhtml+xml"])
