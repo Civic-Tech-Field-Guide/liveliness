@@ -255,15 +255,20 @@ def _move_trust(listed, new, name=None, check_parked=True, start=None):
     scheme), "apex" (from the front page of the apex into one of its own
     subdomains), "name" (the listed page names the project), or None.
     `start` is where the move began, when that is not the listed address
-    itself, as for a sitemap address that redirected.
+    itself, as for a sitemap address that redirected. With check_parked, a
+    landed page that reads as parked, or a parking host, is never trusted,
+    even on the same site; a sitemap redirect passes check_parked=False and
+    checks the sitemap it landed on itself.
     """
     sh, nh = _site_host(start or listed), _site_host(new)
-    # The same site is the same site whatever the page says; the parked check
-    # is for moves that leave it.
-    if sh == nh:
-        return "same"
+    # The parked check reads the page the move landed on: the cached homepage
+    # fetch followed the redirect, so its text is the landed page's. A lapsed
+    # domain whose www serves a parking "lander" is the same host and still
+    # rejected; a real homepage that merely moved to https or www is not.
     if check_parked and _looks_parked(listed, new):
         return None
+    if sh == nh:
+        return "same"
     if _moves_up(sh, nh):
         return None
     if sh == _registrable(sh) and nh.endswith("." + sh) and _path_prefix(listed) == "":
@@ -283,8 +288,8 @@ def trusted_move(listed, new, name=None, check_parked=True, start=None):
     subdomains is the organization redirecting into its own site, and is
     trusted. A move from
     one subdomain to a sibling or deeper one, or to another domain, is trusted
-    only when the page names the project. A move off the site onto a parking
-    or for-sale page is never trusted (check_parked), whatever its domain.
+    only when the page names the project. A move that lands on a parking or
+    for-sale page is never trusted (check_parked), on the same site or off it.
     """
     return _move_trust(listed, new, name, check_parked, start) is not None
 

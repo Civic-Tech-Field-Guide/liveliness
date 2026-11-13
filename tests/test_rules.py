@@ -1511,6 +1511,8 @@ def test_a_parked_or_for_sale_landing_is_never_trusted(monkeypatch):
     project_name = "Civic Widget"
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://civicwidget.org/": (
         "<title>civicwidget.org is for sale | Civic Widget</title><p>Buy this domain</p>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://civicwidget.org/": "https://www.civicwidget.org/lander"})
+    assert core.landed_url("https://civicwidget.org/", project_name) == "https://civicwidget.org/"
     # Off the site onto another domain's for-sale page.
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://civicwidget.org/": "https://civicwidget.net/lander"})
     assert core.landed_url("https://civicwidget.org/", project_name) == "https://civicwidget.org/"
@@ -2292,11 +2294,18 @@ def test_a_named_move_is_not_taken_for_a_removed_page(monkeypatch):
     assert core.landed_url("https://x.org/projects/widget", "Civic Widget") == "https://widget.x.org/"
 
 
-def test_a_same_host_move_is_trusted_before_the_parked_check(monkeypatch):
+def test_a_same_site_move_is_judged_on_the_landed_page_alone(monkeypatch):
     from liveliness import core
-    monkeypatch.setattr(core, "_PAGE_CACHE", {"http://x.org/": ("<p>This domain is for sale.</p>", {})})
+    # A real short homepage: the move to https is the same site.
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"http://x.org/": ("<title>X</title><p>Small project.</p>", {})})
     monkeypatch.setattr(core, "_PAGE_FINAL", {"http://x.org/": "https://x.org/"})
     assert core.landed_url("http://x.org/") == "https://x.org/"
+    # The page the move landed on reads as parked: not trusted, same site or not.
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"http://x.org/": ("<p>This domain is for sale.</p>", {})})
+    assert core.landed_url("http://x.org/") == "http://x.org/"
+    # A parking host is never the same site anyway, and stays rejected.
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"http://x.org/": "https://sedo.com/x.org"})
+    assert core.landed_url("http://x.org/") == "http://x.org/"
 
 
 def test_og_names_are_read_in_either_order_and_with_apostrophes(monkeypatch):
