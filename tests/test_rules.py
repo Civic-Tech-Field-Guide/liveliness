@@ -566,7 +566,7 @@ def test_an_undated_site_with_a_sitemap_date_is_scored(monkeypatch):
     from liveliness import core
     _undated_live_site(monkeypatch, core)
     when = datetime.now(timezone.utc) - timedelta(days=40)
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: (when, "https://x.org/sitemap.xml"))
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now: core.SitemapFind(when, "https://x.org/sitemap.xml"))
     def no_archive(u, now=None):
         raise AssertionError("the archive is not asked once the sitemap answered")
     monkeypatch.setattr(core, "wayback_change_date", no_archive)
@@ -853,7 +853,7 @@ def test_a_sitemap_date_alone_does_not_set_status_active(monkeypatch):
     from liveliness import core
     _undated_live_site(monkeypatch, core)
     when = datetime.now(timezone.utc) - timedelta(days=60)
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: (when, "https://x.org/sitemap.xml"))
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now: core.SitemapFind(when, "https://x.org/sitemap.xml"))
     r = core.score_project(Project(name="x", website="https://x.org/"))
     assert r["score"] == 85 and r["activity_status"] == "Active"
     assert r["status"] is None
@@ -934,7 +934,7 @@ def test_a_page_dated_only_by_a_last_resort_is_still_read(monkeypatch):
     _undated_live_site(monkeypatch, core)
     monkeypatch.setattr(core, "ADJUDICATE", True)
     when = datetime.now(timezone.utc) - timedelta(days=40)
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: (when, "https://x.org/sitemap.xml"))
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now: core.SitemapFind(when, "https://x.org/sitemap.xml"))
     assert core.score_project(Project(name="x", website="https://x.org/"))["adjudication"] is not None
     monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
     monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None: when)
