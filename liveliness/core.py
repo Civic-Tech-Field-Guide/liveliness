@@ -35,7 +35,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 from html.parser import HTMLParser as _HTMLParser
-from urllib.parse import urljoin, parse_qs, parse_qsl, urlparse
+from urllib.parse import urljoin, parse_qs, parse_qsl, urlencode, urlparse
 
 import requests
 
@@ -177,10 +177,8 @@ def _distinctive_words(text):
 
 def _distinctive_name(name):
     """The project name less generic words, or "" when no word of 4+ letters is left."""
-    words = [w for w in _norm_name(name).split() if w not in _GENERIC_NAME_WORDS]
-    if not any(len(w) >= 4 for w in words):
-        return ""
-    return " ".join(words)
+    words = _distinctive_words(name)
+    return words if any(len(w) >= 4 for w in words.split()) else ""
 
 
 def _page_titles(url):
@@ -193,24 +191,19 @@ def _page_titles(url):
     return found
 
 
-def _page_names_project(url):
+def _page_names_project(url, name=None):
     """
     True when the cached page at url names the project in its title or site
     name, with generic words dropped, as long as a word of four or more
     letters is left to match on. A name of short or generic words only never
     matches: too many pages would.
     """
-    name = _distinctive_name(_PROJECT_NAME)
-    if not name:
+    wanted = _distinctive_name(name if name is not None else _PROJECT_NAME)
+    if not wanted:
         return False
-    names = {name}
-    for t in _page_titles(url):
-        # The same small words come out of the title, so "Code for America"
-        # matches its own title once "for" has gone from both.
-        title = " %s " % _distinctive_words(t)
-        if any(" %s " % n in title for n in names):
-            return True
-    return False
+    # The same small words come out of the title, so "Code for America"
+    # matches its own title once "for" has gone from both.
+    return any(" %s " % wanted in " %s " % _distinctive_words(t) for t in _page_titles(url))
 
 
 # Where a lapsed domain goes: a registrar's parking page or a marketplace
@@ -243,7 +236,7 @@ def _looks_parked(listed, new):
     return bool(_PARKED_TEXT.search(" ".join(_page_titles(listed)) + " " + visible))
 
 
-def trusted_move(listed, new):
+def trusted_move(listed, new, name=None):
     """
     True when `new` is the listed site under another name rather than somebody
     else's site: the same registered domain (www, a subdomain), or a page
@@ -254,20 +247,33 @@ def trusted_move(listed, new):
         return False
     if _registrable(_site_host(new)) == _registrable(_site_host(listed)):
         return True
-    return _page_names_project(listed)
+    return _page_names_project(listed, name)
 
 
-def landed_url(url):
+def landed_url(url, name=None):
     """
     Where the listed page's own request ended up, or url itself. Only an
     http(s) address that is not an archive, and is the same organization's
-    site (trusted_move), counts as where the site moved.
+    site (trusted_move), counts as where the site moved. `name` is the
+    project's name; without it the one score_project() set is used.
     """
     final = _PAGE_FINAL.get(url)
     if (not final or not final.lower().startswith(("http://", "https://"))
-            or is_archive_host(final) or not trusted_move(url, final)):
+            or is_archive_host(final) or not trusted_move(url, final, name)):
         return url
     return final
+
+
+def request_caps(remaining, cap):
+    """
+    (timeout, deadline_s) for one get_limited call that must finish within
+    `remaining` seconds. requests applies its timeout to the connection, to
+    the response headers and to each chunk, and the body loop checks its
+    deadline only between chunks, so the worst case is three timeouts plus
+    the body deadline. Each gets a quarter, and neither exceeds `cap`.
+    """
+    share = max(remaining, 0) / 4
+    return min(cap, share), min(cap, share)
 
 
 def get_limited(url, timeout=10, headers=None, deadline_s=None, max_bytes=None):
@@ -1924,6 +1930,12 @@ def latest_news_date(html, base_url, now):
     return best
 
 
+# Where "a while ago" stops meaning likely active. A project silent for longer
+# than this has to clear Possibly Inactive on other evidence. The sitemap's age
+# limit below is the same eighteen months.
+STALE_AFTER_DAYS = 548   # eighteen months
+
+
 # ── The site's sitemap ────────────────────────────────────────────────────────
 #
 # A site that prints no date on its homepage often lists one for every page in
@@ -1968,7 +1980,7 @@ class SitemapFind(NamedTuple):
 # dates would land a live site in Possibly Inactive or Inactive on the strength
 # of a file visitors do not read, so they count for nothing and the archive
 # is asked instead.
-SITEMAP_MAX_AGE_DAYS    = 548           # STALE_AFTER_DAYS; checked equal below it
+SITEMAP_MAX_AGE_DAYS    = STALE_AFTER_DAYS
 # A sitemap can list its newest entries last, and a plain
 # urlset of 25,000 entries runs to a few megabytes, so it gets a larger cap
 # than a page. The deadline still bounds the read.
@@ -2006,9 +2018,11 @@ def _sitemap_body(url, deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 1:
         return None
+    timeout, _ = request_caps(remaining, SITEMAP_TIMEOUT_S)
+    # Three timeouts in the worst case, and the rest for the body.
+    read_s = max(remaining - 3 * timeout, 0.5)
     try:
-        r = get_limited(url, timeout=min(SITEMAP_TIMEOUT_S, remaining), deadline_s=remaining,
-                        max_bytes=SITEMAP_MAX_BYTES)
+        r = get_limited(url, timeout=timeout, deadline_s=read_s, max_bytes=SITEMAP_MAX_BYTES)
     except Exception:
         return None
     if r.status_code != 200 or not r.content:
@@ -2153,23 +2167,34 @@ SITEMAP_PASS_GAP_S = 120   # stamps this close on one day are one generator pass
 
 
 def _stamp_time(mod):
-    """A lastmod's date and time to the second, or None for a bare date."""
-    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::(\d{2}))?", mod)
+    """
+    A lastmod's time to the second in UTC, or None for a bare date. An offset
+    such as +02:00 is applied, so stamps one run wrote in different zones line
+    up; a time with no offset is taken as UTC.
+    """
+    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::(\d{2}))?(?:\.\d+)?"
+                  r"\s*(Z|[+-]\d{2}:?\d{2})?", mod)
     if not m:
         return None
     try:
-        return datetime.strptime("%s %s:%s" % (m.group(1), m.group(2), m.group(3) or "00"),
-                                 "%Y-%m-%d %H:%M:%S")
+        t = datetime.strptime("%s %s:%s" % (m.group(1), m.group(2), m.group(3) or "00"),
+                              "%Y-%m-%d %H:%M:%S")
     except ValueError:
         return None
+    tz = m.group(4)
+    if tz and tz != "Z":
+        sign = 1 if tz[0] == "+" else -1
+        digits = tz[1:].replace(":", "")
+        t -= sign * timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+    return t
 
 
 def _build_passes(mods):
     """
     One key per lastmod, shared by the stamps one generator pass wrote: ("d",
-    day) for a bare date, ("p", n) for a time. Times on one day join a pass
-    while each falls within SITEMAP_PASS_GAP_S of the one before, so a pass
-    that takes minutes to write a large site is still one pass.
+    day) for a bare date, ("p", n) for a time. Times join a pass while each
+    falls within SITEMAP_PASS_GAP_S of the one before, in UTC, so a pass that
+    takes minutes to write a large site, or runs across midnight, is still one.
     """
     keys = [None] * len(mods)
     timed = []
@@ -2183,7 +2208,7 @@ def _build_passes(mods):
     timed.sort()
     n, prev = -1, None
     for t, i in timed:
-        if prev is None or t.date() != prev.date() or (t - prev).total_seconds() > SITEMAP_PASS_GAP_S:
+        if prev is None or (t - prev).total_seconds() > SITEMAP_PASS_GAP_S:
             n += 1
         keys[i] = ("p", n)
         prev = t
@@ -2288,9 +2313,9 @@ def _robots_sitemaps(root, deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 1:
         return []
+    timeout, read_s = request_caps(remaining, SITEMAP_TIMEOUT_S)
     try:
-        r = get_limited(root + "/robots.txt", timeout=min(SITEMAP_TIMEOUT_S, remaining),
-                        deadline_s=remaining)
+        r = get_limited(root + "/robots.txt", timeout=timeout, deadline_s=read_s)
     except Exception:
         return []
     if r.status_code != 200:
@@ -2299,11 +2324,13 @@ def _robots_sitemaps(root, deadline):
     return [u for u in found if u.lower().startswith(("http://", "https://"))][:3]
 
 
-def sitemap_date(url, now, deadline=None):
+def sitemap_date(url, now, deadline=None, landed=None):
     """
     SitemapFind(date, sitemap url, build) for the newest believable change a
     site's sitemap lists for the listed address, or None. `deadline` is a
     time.monotonic() value the search stops at, on top of SITEMAP_DEADLINE_S.
+    `landed` is where the listed homepage moved on a trusted move, as
+    score_project() works it out once; without it, landed_url() is asked.
 
     Sitemaps named in robots.txt come first, then the usual addresses. The first
     one that yields a date is the one used: a site that publishes several
@@ -2327,10 +2354,14 @@ def sitemap_date(url, now, deadline=None):
     # site is the new one, and the section is where it landed. Where robots.txt
     # redirects is not trusted: a parked or hijacked robots.txt can land anywhere.
     prefix = _path_prefix(url)
-    landed = landed_url(url)
+    landed = landed if landed is not None else landed_url(url)
     if landed != url:
+        lp = urlparse(landed)
+        # The page the site moved to has to be one the sitemap can find too.
+        if _identifying_query(lp.query) or _hash_route(lp):
+            return None
         hosts.add(_site_host(landed))
-        p = urlparse(landed)
+        p = lp
         if _site_host(landed) != _site_host(url):
             prefix = _path_prefix(landed)
     root = "%s://%s" % (p.scheme or "https", p.netloc)
@@ -2437,8 +2468,6 @@ def sitemap_date(url, now, deadline=None):
 
 WAYBACK_CDX           = "https://web.archive.org/cdx/search/cdx"
 WAYBACK_TIMEOUT_S     = 10
-WAYBACK_WINDOW        = 20      # recent real captures read to judge churn
-WAYBACK_FETCH_ROWS    = 40      # asked for, so bot checks can be dropped first
 WAYBACK_MIN_CAPTURES  = 4       # distinct days with a real capture, before the hashes mean anything
 WAYBACK_TIMEOUTS_TO_PAUSE = 2
 WAYBACK_MAX_CHURN     = 0.5     # share of captures with a new hash that means churn
@@ -2454,7 +2483,7 @@ _wayback_paused_till = 0.0
 _wayback_timeouts    = 0
 
 
-def _wayback_get(url, params=None):
+def _wayback_get(url, params=None, deadline=None):
     """
     One request to the archive, spaced and paused as the archive asks, or None
     when it could not be asked or refused.
@@ -2464,21 +2493,30 @@ def _wayback_get(url, params=None):
     read (no params) goes through get_limited, for its byte cap and deadline,
     and a failure or server error on it only skips that capture: one bad
     capture says nothing about the archive. A 429 pauses either way.
+
+    Both go through get_limited, with the same caps. Given a deadline, the
+    request is not started unless the spacing and a two-second request fit,
+    and its timeouts are cut so the worst case ends by the deadline.
     """
     page = params is None
     global _wayback_last_call, _wayback_paused_till, _wayback_timeouts
     now = time.monotonic()
     if now < _wayback_paused_till:
         return None
-    wait = _wayback_last_call + WAYBACK_MIN_INTERVAL_S - now
+    wait = max(_wayback_last_call + WAYBACK_MIN_INTERVAL_S - now, 0)
+    if deadline is not None and deadline - now - wait < 2:
+        return None
     if wait > 0:
         time.sleep(wait)
     _wayback_last_call = time.monotonic()
+    if deadline is None:
+        timeout, read_s = WAYBACK_TIMEOUT_S, WAYBACK_TIMEOUT_S
+    else:
+        timeout, read_s = request_caps(deadline - time.monotonic(), WAYBACK_TIMEOUT_S)
+    if params:
+        url = url + "?" + urlencode(params)
     try:
-        if page:
-            r = get_limited(url, timeout=WAYBACK_TIMEOUT_S, deadline_s=WAYBACK_TIMEOUT_S)
-        else:
-            r = SESSION.get(url, params=params, timeout=WAYBACK_TIMEOUT_S)
+        r = get_limited(url, timeout=timeout, deadline_s=read_s)
     except Exception:
         if page:
             return None
@@ -2504,13 +2542,13 @@ def _wayback_get(url, params=None):
     return r
 
 
-def _cdx(params):
+def _cdx(params, deadline=None):
     """Rows from the CDX API, or None when the archive could not be asked."""
-    r = _wayback_get(WAYBACK_CDX, dict(params, output="json"))
+    r = _wayback_get(WAYBACK_CDX, dict(params, output="json"), deadline)
     if r is None:
         return None
     try:
-        rows = r.json() if r.text.strip() else []
+        rows = json.loads(r.text) if r.text.strip() else []
     except ValueError:
         return None
     return [row for row in rows[1:] if isinstance(row, list) and len(row) >= 2]
@@ -2591,13 +2629,13 @@ WAYBACK_TEXT_MIN_PAGE_WORDS = 30  # a capture with fewer is a stub, not the page
 WAYBACK_TEXT_FETCHES        = 5   # archived pages read per listing, at most
 
 
-def _archived_words(ts, target):
+def _archived_words(ts, target, deadline=None):
     """
     The distinct words of the page as the archive captured it at ts, or None
     when the capture cannot be read or is a bot check. Words only, with no
     digits, so a date or a counter in the page is not a change.
     """
-    r = _wayback_get("https://web.archive.org/web/%sid_/http://%s" % (ts, target))
+    r = _wayback_get("https://web.archive.org/web/%sid_/http://%s" % (ts, target), None, deadline)
     if r is None:
         return None
     text = readable_page(r.text or "")["text"]
@@ -2614,11 +2652,12 @@ def _text_differs(a, b):
 def _archive_time_left(deadline):
     """
     False once there is not time for one more archive request: the spacing
-    the archive asks for plus one request's timeout. No deadline, no limit.
+    the archive asks for plus a two-second request, whose timeouts
+    _wayback_get cuts to fit. No deadline, no limit.
     """
     if deadline is None:
         return True
-    return deadline - time.monotonic() > WAYBACK_MIN_INTERVAL_S + WAYBACK_TIMEOUT_S
+    return deadline - time.monotonic() > WAYBACK_MIN_INTERVAL_S + 2
 
 
 def wayback_text_change(rows, target, now, deadline=None):
@@ -2655,7 +2694,7 @@ def wayback_text_change(rows, target, now, deadline=None):
             _log("    wayback  → no time left to read the archived page")
             return None
         reads[0] += 1
-        seen[i] = _archived_words(recent[i][0], target)
+        seen[i] = _archived_words(recent[i][0], target, deadline=deadline)
         if seen[i] is None:
             _log(f"    wayback  → the capture of {recent[i][0][:8]} could not be read")
         return seen[i]
@@ -2711,7 +2750,7 @@ def wayback_text_change(rows, target, now, deadline=None):
     return _cdx_time(recent[last_old + 1][0])
 
 
-def wayback_change_date(url, now=None, deadline=None):
+def wayback_change_date(url, now=None, deadline=None, landed=None):
     """
     When the Wayback Machine last saw the page at url change, or None.
     `deadline` is a time.monotonic() value no archive request starts after.
@@ -2726,7 +2765,8 @@ def wayback_change_date(url, now=None, deadline=None):
         # A #/ route is built in the browser, so every capture is the same shell.
         return None
     # The page the site now serves, where the listed address redirects to it.
-    p = urlparse(landed_url(url))
+    landed = landed if landed is not None else landed_url(url)
+    p = urlparse(landed)
     if not p.netloc or _hash_route(p):
         return None
     target = p.netloc + (p.path or "/")
@@ -2741,11 +2781,13 @@ def wayback_change_date(url, now=None, deadline=None):
     # One capture a day over the last WAYBACK_LOOKBACK_DAYS, so a page captured
     # many times a day still has captures six months and a year back in reach.
     since = (now - timedelta(days=WAYBACK_LOOKBACK_DAYS)).strftime("%Y%m%d")
-    rows = _cdx(dict(base, limit=-WAYBACK_FETCH_ROWS, fastLatest="true",
-                     collapse="timestamp:8", **{"from": since}))
+    rows = _cdx(dict(base, limit=-(WAYBACK_LOOKBACK_DAYS + 10), fastLatest="true",
+                     collapse="timestamp:8", **{"from": since}), deadline=deadline)
     if not rows:
         return None
-    rows = sorted((r for r in rows if _real_capture(r)), key=lambda r: r[0])[-WAYBACK_WINDOW:]
+    # Every day of the window is kept, so the six-month and one-year captures
+    # and the hash check see the whole year, not only the last few weeks.
+    rows = sorted((r for r in rows if _real_capture(r)), key=lambda r: r[0])
     # The query asks for one capture a day, so the count is of distinct days.
     if len({r[0][:8] for r in rows}) < WAYBACK_MIN_CAPTURES:
         _log("    wayback  → too few captures of the page to judge")
@@ -2758,7 +2800,7 @@ def wayback_change_date(url, now=None, deadline=None):
     # a homepage that redirects into a deep page reads that page's news box.
     def is_home(u):
         return _path_prefix(u) == "" and not _identifying_query(urlparse(u).query)
-    homepage = is_home(url) and is_home(landed_url(url))
+    homepage = is_home(url) and is_home(landed)
     if reason == "noise" and homepage:
         dt = wayback_text_change(rows, target, now, deadline)
         if dt is None:
@@ -3116,12 +3158,6 @@ def website_alive_bonus(best_date, now):
     return WEBSITE_ALIVE_BONUS_STALE
 
 
-# Where "a while ago" stops meaning likely active. A project silent for longer
-# than this has to clear Possibly Inactive on other evidence.
-STALE_AFTER_DAYS = 548   # eighteen months
-# The sitemap's age limit is the same eighteen months, defined earlier only
-# because the sitemap code comes first in this file.
-assert SITEMAP_MAX_AGE_DAYS == STALE_AFTER_DAYS
 
 
 def recency_base_score(dt, now):
@@ -3485,8 +3521,10 @@ def score_project(project, budget_s=None):
         # own when the caller gave none, so nothing can run past it unbounded.
         stage = time.monotonic() + LAST_RESORTS_S
         lr_deadline = deadline if deadline is not None else stage
+        # Where the homepage moved, worked out once for both last resorts.
+        landed = landed_url(website_url, name)
         if website_alive is True and site_verdict == "ok":
-            found = sitemap_date(website_url, now, deadline=lr_deadline)
+            found = sitemap_date(website_url, now, deadline=lr_deadline, landed=landed)
             if found:
                 if found.build:
                     candidates.append((wayback_recency_score(found[0], now), found[0],
@@ -3505,7 +3543,7 @@ def score_project(project, budget_s=None):
         # higher of the two wins as the strongest signal.
         sitemap_old = found and (now - found[0]).days > WAYBACK_RECENT_CHANGE_DAYS
         if (not found or sitemap_old) and not fresh_copyright and not js_shell:
-            changed = wayback_change_date(website_url, now, deadline=lr_deadline)
+            changed = wayback_change_date(website_url, now, deadline=lr_deadline, landed=landed)
             if changed:
                 candidates.append((wayback_recency_score(changed, now), changed,
                                    WAYBACK_LABEL, WAYBACK))
