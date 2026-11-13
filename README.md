@@ -153,7 +153,7 @@ The scorer doesn't use the archive when:
 
 The archive is the main way to reach sites that block this checker. It is weak evidence: a change within a year scores 45, the same as a recent footer copyright. It never earns the points for a responding website, and the scorer doesn't report it as the last activity date, because it records when the archive looked, not anything the project did.
 
-The archive allows about 15 requests a minute, so the scorer waits four seconds between requests. After a refusal (429), or two archive searches in a row that had a fair chance and got no answer or a server error (a timeout of at least five seconds, or a request given the time that remained), it leaves the archive alone for ten minutes and counts those as no evidence. A search the scorer cut below five seconds to fit its time limit, or a failed or erroring year-long search it is about to retry with a shorter one, doesn't count toward that.
+The archive allows about 15 requests a minute, so the scorer waits four seconds between requests. After a refusal (429), or two archive searches in a row that had a fair chance and got no answer or a server error (a timeout of at least five seconds; an archive search is not started with under five seconds left, and otherwise always gets at least five), it leaves the archive alone for ten minutes and counts those as no evidence. A search the scorer cut below five seconds to fit its time limit, or a failed or erroring year-long search it is about to retry with a shorter one, doesn't count toward that.
 
 ### Dates
 

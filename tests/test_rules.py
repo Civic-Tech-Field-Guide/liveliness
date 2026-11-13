@@ -1805,9 +1805,9 @@ def test_a_failed_year_query_does_not_pause_the_archive(monkeypatch):
     assert len(asked) == 2
 
 
-def test_a_request_sized_to_the_time_left_counts_toward_the_pause(monkeypatch):
-    # A request given all the time that remained had a fair chance, however
-    # short that time was, so its failure counts.
+def test_a_request_we_cut_short_does_not_count_toward_the_pause(monkeypatch):
+    # With under five seconds left an archive search is not started at all, so
+    # a search cut below five seconds never happens and never counts.
     import time
     import requests
     from liveliness import core
@@ -1815,11 +1815,19 @@ def test_a_request_sized_to_the_time_left_counts_toward_the_pause(monkeypatch):
     monkeypatch.setattr(core, "_wayback_last_call", 0.0)
     monkeypatch.setattr(core, "_wayback_timeouts", 0)
     monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    asked = []
     def get(url, timeout=None, **k):
+        asked.append(timeout)
         raise requests.Timeout("slow")
     monkeypatch.setattr(core.SESSION, "get", get)
+    for _ in range(3):
+        core._cdx({"url": "x.org/"}, deadline=time.monotonic() + 4)
+    assert asked == [] and core._wayback_paused_till == 0.0
+    # With time for one (after the four-second spacing), the search gets at
+    # least five seconds, and counts.
     for _ in range(2):
-        core._cdx({"url": "x.org/"}, deadline=time.monotonic() + 8)
+        core._cdx({"url": "x.org/"}, deadline=time.monotonic() + 12)
+    assert all(t >= core.WAYBACK_PAUSE_MIN_TIMEOUT_S for t in asked)
     assert core._wayback_paused_till > time.monotonic()
 
 

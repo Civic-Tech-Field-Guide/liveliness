@@ -2688,22 +2688,23 @@ def _wayback_get(url, params=None, deadline=None, count_failure=True):
     if now < _wayback_paused_till:
         return None
     wait = max(_wayback_last_call + WAYBACK_MIN_INTERVAL_S - now, 0)
-    if deadline is not None and deadline - now - wait < 2:
+    # A search needs WAYBACK_PAUSE_MIN_TIMEOUT_S to be a fair try, so it is not
+    # started with less left; a page read needs only a couple of seconds.
+    least = 2 if page else WAYBACK_PAUSE_MIN_TIMEOUT_S
+    if deadline is not None and deadline - now - wait < least:
         return None
     if wait > 0:
         time.sleep(wait)
     _wayback_last_call = time.monotonic()
     remaining = None if deadline is None else deadline - time.monotonic()
     timeout = WAYBACK_TIMEOUT_S if remaining is None else request_caps(remaining, WAYBACK_TIMEOUT_S)
-    # A failure counts toward the pause when the request had a fair chance:
-    # a timeout of at least WAYBACK_PAUSE_MIN_TIMEOUT_S, or at least 80% of the
-    # time that remained. get_within gives a request sized to a deadline its
-    # three timeouts and its body deadline out of all the time left, so such a
-    # request had that time; only one squeezed by a deadline already passed
-    # would not.
-    allowed = None if remaining is None else 3 * timeout + body_deadline(remaining, timeout)
-    full_timeout = (timeout >= WAYBACK_PAUSE_MIN_TIMEOUT_S
-                    or (remaining is not None and remaining > 0 and allowed >= 0.8 * remaining))
+    if not page:
+        # A search gets at least WAYBACK_PAUSE_MIN_TIMEOUT_S, so an archive that
+        # is down is seen to be down even late in a listing's time.
+        timeout = max(timeout, WAYBACK_PAUSE_MIN_TIMEOUT_S)
+    # A failure counts toward the pause only when the request had a fair
+    # chance: a timeout of at least WAYBACK_PAUSE_MIN_TIMEOUT_S.
+    full_timeout = timeout >= WAYBACK_PAUSE_MIN_TIMEOUT_S
     if params:
         # doseq, so a list of filters goes out as one filter= each.
         url = url + "?" + urlencode(params, doseq=True)
