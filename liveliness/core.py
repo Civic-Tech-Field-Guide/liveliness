@@ -176,9 +176,10 @@ def _distinctive_name(name):
     return words if any(len(w) >= 4 for w in words.split()) else ""
 
 
-def _page_titles(url):
-    """The title and og:site_name / og:title of the cached page at url."""
-    html = (_PAGE_CACHE.get(url) or (None, None))[0] or ""
+def _page_titles(url, html=None):
+    """The title and og:site_name / og:title of `html`, or of the cached page at url."""
+    if html is None:
+        html = (_PAGE_CACHE.get(url) or (None, None))[0] or ""
     head = html[:200_000]
     found = re.findall(r"<title[^>]*>([\s\S]*?)</title>", head, re.I)
     found += re.findall(r'<meta[^>]+property=["\']og:(?:site_name|title)["\'][^>]+content=["\']([^"\']*)',
@@ -233,21 +234,35 @@ def _looks_parked(listed, new, html=None):
     visible = re.sub(r"<[^>]+>", " ", visible)
     if len(visible.split()) >= PARKED_MAX_WORDS:
         return False
-    titles = " ".join(_page_titles(listed)) if html is None else ""
+    # The title and og: names are in the head, outside the visible text.
+    titles = " ".join(_page_titles(listed, html))
     return bool(_PARKED_TEXT.search(titles + " " + visible))
+
+
+def _moves_up(listed_host, new_host):
+    """True when new_host is an ancestor of listed_host: civiclab.uni.edu to uni.edu."""
+    return listed_host != new_host and listed_host.endswith("." + new_host)
 
 
 def trusted_move(listed, new, name=None):
     """
     True when `new` is the listed site under another name rather than somebody
-    else's site: the same registered domain (www, a subdomain), or a page
-    that names the project. A funder's, parent's or parking domain is neither,
-    and a parking or for-sale page is never trusted, whatever its domain.
+    else's site.
+
+    The same host, with or without www, is the same site. A move up to a
+    parent host (civiclab.uni.edu to www.uni.edu) is never trusted: that is
+    the parent's site, and it would date the project by the parent's news. A
+    move to a deeper or sibling subdomain, or to another domain, is trusted
+    only when the page names the project. A parking or for-sale page is never
+    trusted, whatever its domain.
     """
     if _looks_parked(listed, new):
         return False
-    if _registrable(_site_host(new)) == _registrable(_site_host(listed)):
+    lh, nh = _site_host(listed), _site_host(new)
+    if lh == nh:
         return True
+    if _moves_up(lh, nh):
+        return False
     return _page_names_project(listed, name)
 
 
@@ -256,37 +271,24 @@ def landed_url(url, name=None):
     Where the listed page's own request ended up, or url itself. Only an
     http(s) address that is not an archive, and is the same organization's
     site (trusted_move), counts as where the site moved. `name` is the
-    project's name; without it, only a move within the same registered domain
-    is trusted.
+    project's name; without it, only a move within the same host is trusted.
     """
     final = _PAGE_FINAL.get(url)
     if (not final or not final.lower().startswith(("http://", "https://"))
             or is_archive_host(final) or not trusted_move(url, final, name)):
         return url
+    # A page that now sends visitors to its site's front page was removed. The
+    # front page is the site's, not the listing's, so it dates nothing here.
+    if (_site_host(final) == _site_host(url) and _path_prefix(url) != ""
+            and _path_prefix(final) == ""):
+        return url
     return final
 
 
-# One worker for every name lookup, so lookups that hang queue behind each
-# other on one thread rather than piling up a thread each.
+# One worker for the timed name lookups (host_resolves with a timeout), so
+# lookups that hang queue behind each other on one thread rather than piling
+# up a thread each.
 _LOOKUPS = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="lookup")
-
-
-def resolves_within(host, seconds):
-    """
-    True when host resolves within `seconds`. requests' timeouts do not cover
-    the name lookup, and a lookup that hangs can take half a minute, so it runs
-    on the lookup worker and is abandoned if it overruns. A host the homepage
-    fetch already reached has resolved, and is not looked up again.
-    """
-    for listed, final in _PAGE_FINAL.items():
-        if host in (urlparse(listed).hostname, urlparse(final).hostname):
-            return True
-    future = _LOOKUPS.submit(socket.getaddrinfo, host, 443)
-    try:
-        future.result(timeout=max(seconds, 0))
-        return True
-    except Exception:
-        return False
 
 
 def request_caps(remaining, cap):
@@ -680,9 +682,15 @@ def _doh_resolves(host):
     return False if said_no else None
 
 
-def host_resolves(url):
+def host_resolves(url, timeout=None):
     """
     False only when the hostname genuinely does not resolve.
+
+    With `timeout`, the lookup runs on the lookup worker and is given up
+    after that many seconds, since request timeouts do not cover it and a
+    lookup that hangs can take half a minute. Given up, or failing, the answer
+    is None: unknown. The public-resolver check is skipped then, to keep to
+    the time.
 
     A dangling CNAME looks like this: the record exists and points somewhere
     that no longer does, so a lookup succeeds with no address. Any error other
@@ -696,6 +704,14 @@ def host_resolves(url):
     host = (urlparse(url).hostname or "").strip()
     if not host:
         return None
+    if timeout is not None:
+        future = _LOOKUPS.submit(socket.getaddrinfo, host, None)
+        try:
+            future.result(timeout=max(timeout, 0))
+            return True
+        except Exception:
+            future.cancel()
+            return None
     try:
         socket.getaddrinfo(host, None)
         return True
@@ -1986,7 +2002,10 @@ SITEMAP_MAX_DEPTH       = 2     # an index, and an index inside it
 SITEMAP_CHILDREN        = 4     # child sitemaps read from each index
 SITEMAP_DEADLINE_S      = 25    # wall clock for the whole search
 SITEMAP_TIMEOUT_S       = 8
-SITEMAP_STAMP_MIN_COUNT = 5     # entries that must share a stamp to call it a build
+SITEMAP_STAMP_MIN_COUNT = 5     # entries that must share a timed stamp to call it a build
+# A bare date is coarse: a small site whose few pages were all edited on one
+# day looks the same as a build. It takes this many entries to call it one.
+SITEMAP_DAY_STAMP_MIN_COUNT = 20
 SITEMAP_LABEL           = "Newest change listed in the site's sitemap"
 SITEMAP_BUILD_LABEL     = "Whole-site publish listed in the site's sitemap"
 
@@ -2044,8 +2063,9 @@ def _gunzip_prefix(body):
 
 def _sitemap_body(url, deadline):
     """
-    (text, final url) for the sitemap at url, or None when it is not one. The
-    final url is where any redirect landed.
+    (text, final url, root kind) for the sitemap at url, or None when it is
+    not one. The final url is where any redirect landed; the kind is
+    "urlset" or "sitemapindex".
     """
     remaining = deadline - time.monotonic()
     if remaining <= 1:
@@ -2066,9 +2086,10 @@ def _sitemap_body(url, deadline):
             return None
     text = body.decode("utf-8", errors="replace")
     # A missing sitemap often answers 200 with the site's own 404 page.
-    if _sitemap_root(text) is None:
+    kind = _sitemap_root(text)
+    if kind is None:
         return None
-    return text, (r.url or url)
+    return text, (r.url or url), kind
 
 
 # What may come before a sitemap's root element: whitespace, the XML
@@ -2090,11 +2111,14 @@ def _sitemap_root(text):
     return m.group(1).lower() if m else None
 
 
-def parse_sitemap(text):
+def parse_sitemap(text, root=None):
     """
-    ("index" | "urlset", [(loc, lastmod raw or None), ...]) for a sitemap's text.
+    ("index" | "urlset", [(loc, lastmod raw or None), ...]) for a sitemap's
+    text. `root` is the root element _sitemap_body() already found, when the
+    caller has it.
     """
-    kind = "index" if _sitemap_root(text) == "sitemapindex" else "urlset"
+    root = root if root is not None else _sitemap_root(text)
+    kind = "index" if root == "sitemapindex" else "urlset"
     want = "sitemap" if kind == "index" else "url"
     entries = []
     for m in _SITEMAP_ENTRY_RE.finditer(text):
@@ -2141,11 +2165,20 @@ def _within(loc, prefix):
     """True when a sitemap entry sits at or under the listed path."""
     if not prefix:
         return True
-    path = (urlparse(loc).path or "").rstrip("/")
+    path = (urlparse(loc).path or "").rstrip("/").lower()
+    prefix = prefix.lower()
     return path == prefix or path.startswith(prefix + "/")
 
 
 _TRACKING_PARAM = re.compile(r"^(?:utm_\w+|fbclid|gclid|mc_cid|mc_eid|ref|source)$", re.I)
+
+
+def _section_word(prefix):
+    """The first segment of a listing's path, after a language root: /en/labs/civic → labs."""
+    segments = [x for x in prefix.strip("/").lower().split("/") if x]
+    if len(segments) > 1 and _is_language_root("/" + segments[0]):
+        segments = segments[1:]
+    return segments[0] if segments else ""
 
 
 def _names_section(loc, section):
@@ -2174,8 +2207,10 @@ def _identifying_query(query):
 
 
 def _site_host(url):
-    """A URL's host without a leading www, for telling one site from another."""
-    return (_netloc(url) or "").removeprefix("www.")
+    """A URL's host without a leading www or a default port, for telling one site from another."""
+    host = (_netloc(url) or "").lower()
+    host = re.sub(r":(?:80|443)$", "", host)
+    return host.removeprefix("www.")
 
 
 def _same_site(loc, hosts):
@@ -2312,7 +2347,11 @@ def sitemap_newest_entry(entries, now, prefix="", hosts=None, builds=None):
     # A generator that writes one stamp on every entry, a date or a time, says
     # when the file was built, not when anything changed. Below five entries
     # one sitting of edits can look the same, so it is believed.
-    if len(raws) >= SITEMAP_STAMP_MIN_COUNT and len(set(raws)) == 1:
+    def enough(key, n):
+        """Enough entries to call a shared stamp a build: more for a bare date."""
+        return n >= (SITEMAP_DAY_STAMP_MIN_COUNT if key[0] == "d" else SITEMAP_STAMP_MIN_COUNT)
+
+    if len(set(raws)) == 1 and enough(raws[0], len(raws)):
         set_aside(lambda d, k: False)
         return None
     # Pages edited by hand are not stamped minutes apart in one run. When one
@@ -2320,9 +2359,9 @@ def sitemap_newest_entry(entries, now, prefix="", hosts=None, builds=None):
     # so they are set aside even when the pass is the newest thing in the
     # file, and the rest date the site. A bare date shared that widely is the
     # same thing at a coarser grain: a generator that writes only the day.
-    if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
+    if dated:
         stamp, count = Counter(k for _, k, _, _ in dated).most_common(1)[0]
-        if count >= SITEMAP_BUILD_SHARE * len(dated):
+        if enough(stamp, len(dated)) and count >= SITEMAP_BUILD_SHARE * len(dated):
             set_aside(lambda d, k: k != stamp)
     if len(dated) >= SITEMAP_BIG_DAY_MIN:
         day, count = Counter(d.date() for d, _, _, _ in dated).most_common(1)[0]
@@ -2332,12 +2371,6 @@ def sitemap_newest_entry(entries, now, prefix="", hosts=None, builds=None):
     if not mine:
         return None
     return max(mine, key=lambda x: x[0])
-
-
-def sitemap_newest_date(entries, now, prefix="", hosts=None, builds=None):
-    """The date alone from sitemap_newest_entry(), or None."""
-    found = sitemap_newest_entry(entries, now, prefix, hosts, builds)
-    return found[0] if found else None
 
 
 def _robots_sitemaps(root, deadline):
@@ -2403,7 +2436,11 @@ def sitemap_date(url, now, deadline=None, landed=None, name=None):
     if deadline - time.monotonic() <= 1:
         return None
     # A name lookup is outside every request timeout, so it gets its own limit.
-    if not resolves_within(p.hostname or p.netloc, min(SITEMAP_TIMEOUT_S, deadline - time.monotonic() - 1)):
+    # A host the homepage fetch already reached has resolved.
+    reached = {urlparse(u).hostname for pair in _PAGE_FINAL.items() for u in pair}
+    if (p.hostname not in reached
+            and host_resolves(root, timeout=min(SITEMAP_TIMEOUT_S, deadline - time.monotonic() - 1))
+            is not True):
         _log("    sitemap  → the site's name did not resolve in time")
         return None
     fetches = 1
@@ -2413,7 +2450,7 @@ def sitemap_date(url, now, deadline=None, landed=None, name=None):
     # Final addresses already read, so one index reached under two names, such
     # as /sitemap.xml redirecting to /sitemap_index.xml, is read once.
     visited = set()
-    section = prefix.strip("/").split("/")[0].lower()
+    section = _section_word(prefix)
     for top in tops:
         if fetches >= SITEMAP_MAX_FETCHES:
             break
@@ -2423,26 +2460,28 @@ def sitemap_date(url, now, deadline=None, landed=None, name=None):
         got = _sitemap_body(top, deadline)
         if got is None:
             continue
-        text, final = got
+        text, final, root_kind = got
         if final in visited:
             continue
         visited.update((top, final))
         # Where the site's own sitemap address redirected is the site too, when
-        # it stays within the same registered domain. The project's homepage
+        # it stays within the same registered domain and does not go up to a
+        # parent host, which would be the parent's list. The project's homepage
         # title cannot vouch for it: that page says nothing about the domain
         # the sitemap went to. A sitemap robots.txt names on some other host
         # does not make that host this site.
         if (_site_host(top) in hosts
                 and _registrable(_site_host(final)) == _registrable(_site_host(top))
+                and not _moves_up(_site_host(top), _site_host(final))
                 and not _looks_parked(url, final, html=text)):
             hosts.add(_site_host(final))
         # Every entry under one top sitemap is judged together, so a generator
         # pass split across many small child files is still one pass.
         gathered = []
-        queue = [(final, text, 0)]
+        queue = [(final, text, root_kind, 0)]
         while queue:
-            src, body, depth = queue.pop(0)
-            kind, entries = parse_sitemap(body)
+            src, body, body_kind, depth = queue.pop(0)
+            kind, entries = parse_sitemap(body, body_kind)
             # Some sitemaps list paths rather than full addresses.
             entries = [(urljoin(src, loc), mod) for loc, mod in entries]
             if kind == "urlset":
@@ -2463,7 +2502,7 @@ def sitemap_date(url, now, deadline=None, landed=None, name=None):
                 child = _sitemap_body(loc, deadline)
                 if child is not None and child[1] not in visited:
                     visited.update((loc, child[1]))
-                    queue.append((child[1], child[0], depth + 1))
+                    queue.append((child[1], child[0], child[2], depth + 1))
         builds = []
         found = sitemap_newest_entry(gathered, now, prefix, hosts, builds)
         # A top sitemap that dated anything is the site's list. The other
@@ -3577,7 +3616,11 @@ def score_project(project, budget_s=None):
                        and page_copyright_year >= now.year - 1)
     project_site = url_class == "homepage" or (url_class == "article" and discovered_url)
     # A stale social post scores 0 and is no reason to stop looking.
-    if (not any(c[0] > 0 for c in candidates) and website_url and project_site
+    # Asked when nothing the project left is recent: a three-year-old commit
+    # scoring 35 is no reason not to look for something newer.
+    recent_own = any(c[3] == OWN and c[0] > 0 and (now - c[1]).days <= STALE_AFTER_DAYS
+                     for c in candidates)
+    if (not recent_own and website_url and project_site
             and not page_closed and not is_archived and site_verdict in ("ok", "blocked")
             # A snapshot address dates the snapshot, not the project, whether
             # or not the original still answers.

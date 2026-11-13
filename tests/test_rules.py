@@ -216,6 +216,13 @@ def _now():
     from datetime import datetime, timezone
     return datetime(2026, 11, 10, 12, tzinfo=timezone.utc)
 
+def _newest_date(entries, now=None, prefix="", hosts=None, builds=None):
+    """The date from sitemap_newest_entry(), or None."""
+    from liveliness import core
+    found = core.sitemap_newest_entry(entries, now or _now(), prefix, hosts, builds)
+    return found[0] if found else None
+
+
 
 def test_the_activity_bands_are_public():
     from liveliness import score_to_activity_status
@@ -232,24 +239,24 @@ def test_a_sitemap_is_dated_by_its_newest_entry():
             '<url><loc>https://x.org/team</loc></url></urlset>')
     kind, entries = core.parse_sitemap(text)
     assert kind == "urlset" and len(entries) == 3
-    assert core.sitemap_newest_date(entries, _now()) == datetime(2026, 7, 14, tzinfo=timezone.utc)
+    assert _newest_date(entries, _now()) == datetime(2026, 7, 14, tzinfo=timezone.utc)
 
 
 def test_a_sitemap_stamp_of_today_or_yesterday_is_the_servers_clock():
     from liveliness import core
     entries = [("https://x.org/", "2026-11-10"), ("https://x.org/a", "2026-11-09T23:00:00Z")]
-    assert core.sitemap_newest_date(entries, _now()) is None
+    assert _newest_date(entries, _now()) is None
     entries.append(("https://x.org/b", "2026-11-08"))
-    assert core.sitemap_newest_date(entries, _now()).day == 8
+    assert _newest_date(entries, _now()).day == 8
 
 
 def test_a_sitemap_with_one_stamp_on_every_entry_is_a_build_not_a_change():
     from liveliness import core
     entries = [("https://x.org/%d" % i, "2026-10-01T08:00:00Z") for i in range(6)]
-    assert core.sitemap_newest_date(entries, _now()) is None
+    assert _newest_date(entries, _now()) is None
     # A handful of pages edited on one day is not enough to call it a build.
     by_day = [("https://x.org/%d" % i, "2026-10-01") for i in range(3)]
-    assert core.sitemap_newest_date(by_day, _now()) is not None
+    assert _newest_date(by_day, _now()) is not None
 
 
 def test_a_listing_deep_in_a_site_is_dated_by_its_own_section():
@@ -258,9 +265,9 @@ def test_a_listing_deep_in_a_site_is_dated_by_its_own_section():
                ("https://uni.edu/labs/civic/", "2024-05-01"),
                ("https://uni.edu/labs/civic/people", "2025-01-20"),
                ("https://uni.edu/labs/civics-other", "2026-10-29")]
-    dt = core.sitemap_newest_date(entries, _now(), core._path_prefix("https://uni.edu/labs/civic/"))
+    dt = _newest_date(entries, _now(), core._path_prefix("https://uni.edu/labs/civic/"))
     assert (dt.year, dt.month) == (2025, 1)
-    assert core.sitemap_newest_date(entries, _now(), "/labs/nothing") is None
+    assert _newest_date(entries, _now(), "/labs/nothing") is None
     assert core._path_prefix("https://x.org/index.html") == ""
     assert core._path_prefix("https://x.org/lab/default.aspx") == "/lab"
 
@@ -292,7 +299,7 @@ def _fake_web(monkeypatch, core, pages):
         return _FakeResponse(final, body)
     monkeypatch.setattr(core, "get_limited", get)
     # The fake web resolves every name, so no test does a real lookup.
-    monkeypatch.setattr(core, "resolves_within", lambda host, seconds: True)
+    monkeypatch.setattr(core, "host_resolves", lambda url, timeout=None: True)
     return seen
 
 
@@ -368,21 +375,21 @@ def test_a_sitemap_stamp_on_nearly_every_entry_is_a_build(monkeypatch):
     from liveliness import core
     entries = [("https://x.org/p/%d" % i, "2026-08-30T0%d:00:00Z" % (i % 10)) for i in range(18)]
     entries += [("https://x.org/", "2026-09-05"), ("https://x.org/about", "2025-06-01")]
-    dt = core.sitemap_newest_date(entries, _now())
+    dt = _newest_date(entries, _now())
     assert (dt.year, dt.month, dt.day) == (2026, 9, 5)
     # A build that is the newest thing in the file is a recent deploy, and counts.
-    assert core.sitemap_newest_date(entries[:18], _now()).day == 30
+    assert _newest_date(entries[:18], _now()).day == 30
 
 
 def test_a_sitemap_stamped_to_the_same_second_is_a_build_once_it_has_five_entries():
     from liveliness import core
     stamp = "2026-11-07T23:00:47+00:00"
     entries = [("https://x.org/%d" % i, stamp) for i in range(5)]
-    assert core.sitemap_newest_date(entries, _now()) is None
+    assert _newest_date(entries, _now()) is None
     # Three pages are too few to tell a generator from one sitting of edits.
-    assert core.sitemap_newest_date(entries[:3], _now()) is not None
+    assert _newest_date(entries[:3], _now()) is not None
     # Two pages edited on the same day, dated without a time, are just that.
-    assert core.sitemap_newest_date([("https://x.org/a", "2026-10-05"),
+    assert _newest_date([("https://x.org/a", "2026-10-05"),
                                      ("https://x.org/b", "2026-10-05")], _now()) is not None
 
 
@@ -390,7 +397,7 @@ def test_a_date_only_build_day_is_set_aside_even_when_newest():
     from liveliness import core
     entries = [("https://x.org/p/%d" % i, "2026-10-20") for i in range(18)]
     entries += [("https://x.org/", "2025-09-05"), ("https://x.org/about", "2025-06-01")]
-    dt = core.sitemap_newest_date(entries, _now())
+    dt = _newest_date(entries, _now())
     assert (dt.year, dt.month, dt.day) == (2025, 9, 5)
 
 
@@ -514,9 +521,9 @@ def test_getting_past_a_bot_check_is_not_a_content_change(monkeypatch):
 def test_a_sitemap_of_another_site_says_nothing_about_this_one():
     from liveliness import core
     entries = [("https://news.example/story/1", "2026-11-01"), ("https://www.x.org/", "2025-02-01")]
-    dt = core.sitemap_newest_date(entries, _now(), "", {"x.org"})
+    dt = _newest_date(entries, _now(), "", {"x.org"})
     assert (dt.year, dt.month) == (2025, 2)
-    assert core.sitemap_newest_date(entries[:1], _now(), "", {"x.org"}) is None
+    assert _newest_date(entries[:1], _now(), "", {"x.org"}) is None
 
 
 def test_a_sitemap_that_lists_bare_paths_is_read_as_its_own_site(monkeypatch):
@@ -727,7 +734,7 @@ def test_a_server_clock_entry_does_not_hide_a_recent_build():
     from liveliness import core
     entries = [("https://x.org/p/%d" % i, "2026-10-20T%02d:00:00Z" % i) for i in range(18)]
     entries += [("https://x.org/now", "2026-11-10T09:00:00Z"), ("https://x.org/about", "2025-06-01")]
-    dt = core.sitemap_newest_date(entries, _now())
+    dt = _newest_date(entries, _now())
     assert (dt.year, dt.month, dt.day) == (2026, 10, 20)
 
 
@@ -843,7 +850,7 @@ def test_a_change_after_a_long_gap_in_captures_is_not_dated_recent():
 def test_one_date_on_every_sitemap_entry_is_a_build():
     from liveliness import core
     entries = [("https://x.org/%d" % i, "2026-06-01") for i in range(50)]
-    assert core.sitemap_newest_date(entries, _now()) is None
+    assert _newest_date(entries, _now()) is None
 
 
 def test_a_build_stamp_on_nearly_every_entry_is_set_aside_even_when_newest():
@@ -851,7 +858,7 @@ def test_a_build_stamp_on_nearly_every_entry_is_set_aside_even_when_newest():
     from liveliness import core
     entries = [("https://x.org/%d" % i, "2026-06-01T12:00:00Z") for i in range(50)]
     entries.append(("https://x.org/about", "2024-01-01"))
-    assert core.sitemap_newest_date(entries, _now()) == datetime(2024, 1, 1, tzinfo=timezone.utc)
+    assert _newest_date(entries, _now()) == datetime(2024, 1, 1, tzinfo=timezone.utc)
 
 
 def test_a_sitemap_date_alone_does_not_set_status_active(monkeypatch):
@@ -886,10 +893,10 @@ def test_one_generator_pass_is_one_stamp_to_the_minute():
     from datetime import datetime, timezone
     from liveliness import core
     same = [("https://x.org/%d" % i, "2026-06-01T12:00:%02d.%03dZ" % (i, i * 7)) for i in range(6)]
-    assert core.sitemap_newest_date(same, _now()) is None
+    assert _newest_date(same, _now()) is None
     pass_ = [("https://x.org/%d" % i, "2026-06-01T12:00:%02dZ" % (i % 60)) for i in range(50)]
     pass_.append(("https://x.org/about", "2024-01-01"))
-    assert core.sitemap_newest_date(pass_, _now()) == datetime(2024, 1, 1, tzinfo=timezone.utc)
+    assert _newest_date(pass_, _now()) == datetime(2024, 1, 1, tzinfo=timezone.utc)
 
 
 def test_build_stamps_are_judged_across_a_whole_sitemap_index(monkeypatch):
@@ -986,7 +993,7 @@ def test_a_generator_pass_spread_over_minutes_is_one_pass():
     entries = [("https://x.org/%d" % i, (start + timedelta(seconds=50 * i)).strftime("%Y-%m-%dT%H:%M:%SZ"))
                for i in range(50)]
     entries.append(("https://x.org/about", "2024-01-01"))
-    assert core.sitemap_newest_date(entries, _now()) == datetime(2024, 1, 1, tzinfo=timezone.utc)
+    assert _newest_date(entries, _now()) == datetime(2024, 1, 1, tzinfo=timezone.utc)
 
 
 def test_a_capture_with_a_bad_timestamp_is_skipped():
@@ -1280,7 +1287,7 @@ def test_a_large_sitemap_is_read_past_the_page_cap(monkeypatch):
         def close(self):
             pass
     monkeypatch.setattr(core.SESSION, "get", lambda *a, **k: Stream())
-    text, _ = core._sitemap_body("https://x.org/sitemap.xml", time.monotonic() + 30)
+    text, *_ = core._sitemap_body("https://x.org/sitemap.xml", time.monotonic() + 30)
     assert "https://x.org/new" in text
 
 
@@ -1313,7 +1320,7 @@ def test_a_redirected_listing_keeps_its_own_path_for_the_sitemap(monkeypatch):
     monkeypatch.setattr(core, "_PAGE_FINAL", {})
     body = ('<urlset><url><loc>https://www.x.org/labs/a</loc><lastmod>2026-09-01</lastmod></url>'
             '<url><loc>https://www.x.org/other</loc><lastmod>2026-10-01</lastmod></url></urlset>')
-    _fake_web(monkeypatch, core, {"https://x.org/labs/": ("<html></html>", "https://www.x.org/"),
+    _fake_web(monkeypatch, core, {"https://x.org/labs/": ("<html></html>", "https://www.x.org/labs/"),
                                   "https://www.x.org/sitemap.xml": body})
     core.get_page_cached("https://x.org/labs/")
     dt, *_ = core.sitemap_date("https://x.org/labs/", _now())
@@ -1355,8 +1362,9 @@ def test_a_move_to_another_organizations_domain_is_not_trusted(monkeypatch):
     # The same organization's other host is trusted.
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://www.x.org/home"})
     assert core.landed_url("https://x.org/", project_name) == "https://www.x.org/home"
+    # A deeper subdomain needs the name, and this page does not carry it.
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.co.uk/": "https://new.x.co.uk/"})
-    assert core.landed_url("https://x.co.uk/", project_name) == "https://new.x.co.uk/"
+    assert core.landed_url("https://x.co.uk/", project_name) == "https://x.co.uk/"
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://a.co.uk/": "https://b.co.uk/"})
     assert core.landed_url("https://a.co.uk/", project_name) == "https://a.co.uk/"
     # A new domain whose page names the project is the project moved.
@@ -1437,9 +1445,9 @@ def test_cms_default_pages_do_not_date_a_site():
     from liveliness import core
     entries = [("https://x.org/sample-page/", "2025-09-12"), ("https://x.org/hello-world/", "2025-09-12"),
                ("https://x.org/category/uncategorized/", "2025-09-12")]
-    assert core.sitemap_newest_date(entries, _now()) is None
+    assert _newest_date(entries, _now()) is None
     entries.append(("https://x.org/about/", "2024-03-01"))
-    assert core.sitemap_newest_date(entries, _now()).year == 2024
+    assert _newest_date(entries, _now()).year == 2024
 
 
 def test_a_day_with_a_thousand_entries_and_half_the_file_is_a_build():
@@ -1450,11 +1458,11 @@ def test_a_day_with_a_thousand_entries_and_half_the_file_is_a_build():
            for i in range(1200)]
     rest = [("https://x.org/b%d" % i, "2026-%02d-15" % (1 + i % 9)) for i in range(1000)]
     rest.append(("https://x.org/post", "2026-10-01"))
-    dt = core.sitemap_newest_date(big + rest, _now())
+    dt = _newest_date(big + rest, _now())
     assert dt == datetime(2026, 10, 1, tzinfo=timezone.utc)
     # Below a thousand entries the day stands.
     small = big[:600] + rest[:400]
-    assert core.sitemap_newest_date(small, _now()).date().isoformat() == "2026-11-08"
+    assert _newest_date(small, _now()).date().isoformat() == "2026-11-08"
 
 
 def test_a_name_with_generic_words_dropped_matches_the_new_title(monkeypatch):
@@ -1977,7 +1985,10 @@ def test_no_lookup_for_a_host_the_homepage_already_reached(monkeypatch):
     monkeypatch.setattr(core.socket, "getaddrinfo", never)
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://x.org/"})
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<html></html>", {})})
-    assert core.resolves_within("x.org", 2)
+    # The sitemap search goes ahead without a lookup; it finds nothing here.
+    _fake_web(monkeypatch, core, {})
+    monkeypatch.setattr(core, "host_resolves", never)
+    assert core.sitemap_date("https://x.org/", _now()) is None
 
 
 def test_hung_lookups_share_one_thread(monkeypatch):
@@ -1988,7 +1999,7 @@ def test_hung_lookups_share_one_thread(monkeypatch):
     monkeypatch.setattr(core.socket, "getaddrinfo", lambda *a, **k: time.sleep(3))
     before = threading.active_count()
     for i in range(4):
-        core.resolves_within("slow%d.example" % i, 0.1)
+        core.host_resolves("https://slow%d.example/" % i, timeout=0.1)
     assert threading.active_count() - before <= 1
 
 
@@ -2005,3 +2016,98 @@ def test_the_project_name_is_passed_not_global(monkeypatch):
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://civicwidget.io/"})
     assert core.landed_url("https://x.org/", "Civic Widget") == "https://civicwidget.io/"
     assert core.landed_url("https://x.org/") == "https://x.org/"
+
+
+# ── Review of c9fe653 ─────────────────────────────────────────────────────────
+
+def test_a_move_up_to_the_parent_site_is_never_trusted(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://civiclab.uni.edu/": ("<title>Civic Lab</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://civiclab.uni.edu/": "https://www.uni.edu/"})
+    assert core.landed_url("https://civiclab.uni.edu/", "Civic Lab") == "https://civiclab.uni.edu/"
+    # www and no-www, and the same host, are the same site.
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://www.x.org/"})
+    assert core.landed_url("https://x.org/") == "https://www.x.org/"
+    # A deeper or sibling subdomain needs the project's name.
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Something else</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://portal.x.org/"})
+    assert core.landed_url("https://x.org/", "Civic Widget") == "https://x.org/"
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Civic Widget portal</title>", {})})
+    assert core.landed_url("https://x.org/", "Civic Widget") == "https://portal.x.org/"
+
+
+def test_a_page_that_redirects_to_its_sites_root_was_removed(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://cfa.org/projects/foo": ("<title>Code for America</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://cfa.org/projects/foo": "https://cfa.org/"})
+    assert core.landed_url("https://cfa.org/projects/foo", "Foo") == "https://cfa.org/projects/foo"
+    asked = []
+    monkeypatch.setattr(core, "_cdx", lambda params, **k: asked.append(params["url"]) or None)
+    core.wayback_change_date("https://cfa.org/projects/foo", _now(), name="Foo")
+    assert asked and all(a == "cfa.org/projects/foo" for a in asked)
+
+
+def test_a_bare_date_build_needs_twenty_entries():
+    from liveliness import core
+    ten = [("https://x.org/%d" % i, "2026-06-01") for i in range(10)]
+    assert _newest_date(ten) is not None
+    twenty = [("https://x.org/%d" % i, "2026-06-01") for i in range(20)]
+    assert _newest_date(twenty) is None
+    # Timed stamps still need only five.
+    timed = [("https://x.org/%d" % i, "2026-06-01T12:00:0%dZ" % i) for i in range(5)]
+    assert _newest_date(timed) is None
+
+
+def test_host_resolves_takes_a_timeout_and_cancels(monkeypatch):
+    import time
+    from liveliness import core
+    monkeypatch.setattr(core.socket, "getaddrinfo", lambda *a, **k: time.sleep(2))
+    start = time.monotonic()
+    assert core.host_resolves("https://slow.example/", timeout=0.2) is None
+    assert time.monotonic() - start < 1
+    assert not hasattr(core, "resolves_within")
+
+
+def test_a_parked_title_or_og_name_counts(monkeypatch):
+    from liveliness import core
+    page = '<head><meta property="og:site_name" content="This domain is for sale"></head><body><p>Hello</p></body>'
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": (page, {})})
+    assert core._looks_parked("https://x.org/", "https://www.x.org/")
+
+
+def test_an_old_signal_does_not_keep_the_last_resorts_away(monkeypatch):
+    from datetime import timedelta
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    old = _now().replace(year=2023)
+    monkeypatch.setattr(core, "check_github", lambda u: {
+        "best_date": old, "archived": False, "dates": {"push": old}, "resolution": None})
+    asked = []
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: asked.append(u))
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: None)
+    core.score_project(Project(name="x", website="https://x.org/", repo="https://github.com/x/x"))
+    assert asked == ["https://x.org/"]
+
+
+def test_default_ports_and_path_case_do_not_split_a_site():
+    from liveliness import core
+    assert core._same_site("https://x.org:443/a", {"x.org"})
+    assert core._same_site("http://x.org:80/a", {"x.org"})
+    assert core._within("https://x.org/Labs/Civic/page", "/labs/civic")
+
+
+def test_a_language_root_is_skipped_when_picking_the_section():
+    from liveliness import core
+    assert core._section_word("/en/labs/civic") == "labs"
+    assert core._section_word("/labs/civic") == "labs"
+    assert core._section_word("") == ""
+
+
+def test_the_sitemap_body_says_what_kind_it_is(monkeypatch):
+    import time
+    from liveliness import core
+    body = '<sitemapindex><sitemap><loc>https://x.org/a.xml</loc></sitemap></sitemapindex>'
+    _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": body})
+    text, final, kind = core._sitemap_body("https://x.org/sitemap.xml", time.monotonic() + 10)
+    assert kind == "sitemapindex"
+    assert not hasattr(core, "sitemap_newest_date")
