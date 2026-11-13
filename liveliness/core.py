@@ -29,6 +29,7 @@ from html import unescape as html_unescape
 import os
 import re
 import socket
+import threading
 import time
 import zlib
 from collections import Counter
@@ -263,6 +264,27 @@ def landed_url(url, name=None):
             or is_archive_host(final) or not trusted_move(url, final, name)):
         return url
     return final
+
+
+def resolves_within(host, seconds):
+    """
+    True when host resolves within `seconds`. requests' timeouts do not cover
+    the name lookup, and a lookup that hangs can take half a minute, so the
+    lookup runs on a daemon thread that is left behind if it overruns.
+    """
+    result = {}
+
+    def look():
+        try:
+            socket.getaddrinfo(host, 443)
+            result["ok"] = True
+        except Exception:
+            result["ok"] = False
+
+    t = threading.Thread(target=look, daemon=True)
+    t.start()
+    t.join(max(seconds, 0))
+    return result.get("ok", False)
 
 
 def request_caps(remaining, cap):
@@ -2373,6 +2395,10 @@ def sitemap_date(url, now, deadline=None, landed=None):
     deadline = min(time.monotonic() + SITEMAP_DEADLINE_S,
                    deadline if deadline is not None else float("inf"))
     if deadline - time.monotonic() <= 1:
+        return None
+    # A name lookup is outside every request timeout, so it gets its own limit.
+    if not resolves_within(p.hostname or p.netloc, min(SITEMAP_TIMEOUT_S, deadline - time.monotonic() - 1)):
+        _log("    sitemap  → the site's name did not resolve in time")
         return None
     fetches = 1
     tops = _robots_sitemaps(root, deadline)

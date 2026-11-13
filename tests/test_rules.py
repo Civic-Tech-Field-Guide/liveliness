@@ -291,6 +291,8 @@ def _fake_web(monkeypatch, core, pages):
         body, final = page if isinstance(page, tuple) else (page, url)
         return _FakeResponse(final, body)
     monkeypatch.setattr(core, "get_limited", get)
+    # The fake web resolves every name, so no test does a real lookup.
+    monkeypatch.setattr(core, "resolves_within", lambda host, seconds: True)
     return seen
 
 
@@ -1884,3 +1886,16 @@ def test_titles_are_html_unescaped(monkeypatch):
 def test_xhtml_captures_count_as_pages():
     from liveliness import core
     assert core._real_capture(["20260101000000", "A", "9000", "200", "application/xhtml+xml"])
+
+
+def test_a_hanging_name_lookup_does_not_hold_the_sitemap_past_its_deadline(monkeypatch):
+    import socket
+    import time
+    from liveliness import core
+    def slow_lookup(*a, **k):
+        time.sleep(5)
+        raise socket.gaierror("timed out")
+    monkeypatch.setattr(core.socket, "getaddrinfo", slow_lookup)
+    start = time.monotonic()
+    assert core.sitemap_date("https://slow-dns.example/", _now(), deadline=start + 2) is None
+    assert time.monotonic() - start <= 3

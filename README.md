@@ -47,7 +47,7 @@ from liveliness import set_logger
 set_logger(print)
 ```
 
-To cap the time one project takes, pass `budget_s`: `score_project(project, budget_s=110)` stops the sitemap and Wayback Machine checks, which run last, once that many seconds have passed. Without it, those two checks get 40 seconds between them. Either way the sitemap gets at most 15 seconds, so the archive keeps at least the rest, and each request's timeouts are cut to fit the time left. The limit is close to a hard stop: a request that follows redirects can run over by about one timeout per extra redirect.
+To cap the time one project takes, pass `budget_s`: `score_project(project, budget_s=110)` stops the sitemap and Wayback Machine checks, which run last, once that many seconds have passed. Without it, those two checks get 40 seconds between them. Either way the sitemap gets at most 15 seconds, so the archive keeps at least the rest, and each request's timeouts are cut to fit the time left. The limit is close to a hard stop: a request that follows redirects can run over by about one timeout per extra redirect. The site's name lookup, which request timeouts don't cover, gets its own limit before the sitemap is read.
 
 `Project` requires only a name. Other fields are used when present, and an empty field never lowers the score. `liveliness/project.py` documents each one.
 
