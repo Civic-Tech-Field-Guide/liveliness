@@ -395,7 +395,8 @@ def test_a_sitemap_stamped_to_the_same_second_is_a_build_once_it_has_five_entrie
 
 def test_a_date_only_build_day_is_set_aside_even_when_newest():
     from liveliness import core
-    entries = [("https://x.org/p/%d" % i, "2026-10-20") for i in range(18)]
+    # Twenty entries share the date, enough for a bare-date build.
+    entries = [("https://x.org/p/%d" % i, "2026-10-20") for i in range(20)]
     entries += [("https://x.org/", "2025-09-05"), ("https://x.org/about", "2025-06-01")]
     dt = _newest_date(entries, _now())
     assert (dt.year, dt.month, dt.day) == (2025, 9, 5)
@@ -1510,7 +1511,8 @@ def test_a_parked_or_for_sale_landing_is_never_trusted(monkeypatch):
     project_name = "Civic Widget"
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://civicwidget.org/": (
         "<title>civicwidget.org is for sale | Civic Widget</title><p>Buy this domain</p>", {})})
-    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://civicwidget.org/": "https://www.civicwidget.org/lander"})
+    # Off the site onto another domain's for-sale page.
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://civicwidget.org/": "https://civicwidget.net/lander"})
     assert core.landed_url("https://civicwidget.org/", project_name) == "https://civicwidget.org/"
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://civicwidget.org/": ("<title>Civic Widget</title>", {})})
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://civicwidget.org/": "https://sedo.com/search/details/?domain=civicwidget.org"})
@@ -2218,3 +2220,93 @@ def test_social_links_are_deduplicated_by_site(monkeypatch):
     monkeypatch.setattr(core, "get_page_cached", lambda u: (page, {}))
     links = core.discover_social_links("https://x.org/")
     assert len(links) == 2 and links[0] == "https://TWITTER.com/x"
+
+
+# ── Review of 2dc55f0 ─────────────────────────────────────────────────────────
+
+def test_the_website_bonus_follows_the_newest_date_not_the_winner(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    now = datetime.now(timezone.utc)
+    commit = now - timedelta(days=400)
+    monkeypatch.setattr(core, "check_github", lambda u: {
+        "best_date": commit, "archived": False, "dates": {"push": commit}, "resolution": None})
+    monkeypatch.setattr(core, "discover_social_links", lambda u: ["https://bsky.app/profile/x"])
+    monkeypatch.setattr(core, "check_url_alive", lambda u: False)
+    monkeypatch.setattr(core, "check_social_recency", lambda u: (now - timedelta(days=150), "Bluesky"))
+    r = core.score_project(Project(name="x", website="https://x.org/", repo="https://github.com/x/x"))
+    assert "Website is responding (+15)" in r["breakdown"]
+    assert r["status"] == "Active"
+
+
+def test_a_build_needs_enough_entries_sharing_the_stamp():
+    from liveliness import core
+    # 16 of 20 share a bare date: 80%, but under twenty entries share it.
+    entries = [("https://x.org/a%d" % i, "2026-06-01") for i in range(16)]
+    entries += [("https://x.org/b%d" % i, "2025-0%d-15" % (1 + i)) for i in range(4)]
+    assert _newest_date(entries).isoformat()[:10] == "2026-06-01"
+
+
+def test_lookups_run_on_daemon_threads_and_give_their_slot_back(monkeypatch):
+    import threading
+    import time
+    from liveliness import core
+    # Earlier tests can leave hung lookups holding slots; wait for them to end.
+    held = [core._LOOKUP_SLOTS.acquire(timeout=10) for _ in range(core.LOOKUP_WORKERS)]
+    for ok in held:
+        if ok:
+            core._LOOKUP_SLOTS.release()
+    release = threading.Event()
+    names = []
+    def hang(*a, **k):
+        names.append(threading.current_thread())
+        release.wait(5)
+    monkeypatch.setattr(core.socket, "getaddrinfo", hang)
+    assert core.host_resolves("https://hung.example/", timeout=0.05) is None
+    assert names and names[0].daemon
+    release.set()
+    time.sleep(0.2)
+    # Every slot is free again once the hung lookup ends.
+    got = [core._LOOKUP_SLOTS.acquire(blocking=False) for _ in range(core.LOOKUP_WORKERS)]
+    for ok in got:
+        if ok:
+            core._LOOKUP_SLOTS.release()
+    assert all(got)
+
+
+def test_a_move_to_another_host_reads_its_whole_sitemap(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Civic Widget</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://civicwidget.io/home/"})
+    body = '<urlset><url><loc>https://civicwidget.io/news/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
+    _fake_web(monkeypatch, core, {"https://civicwidget.io/sitemap.xml": body})
+    found = core.sitemap_date("https://x.org/", _now(), name="Civic Widget")
+    assert found is not None and found.date.month == 9
+
+
+def test_a_named_move_is_not_taken_for_a_removed_page(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/projects/widget": ("<title>Civic Widget</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/projects/widget": "https://widget.x.org/"})
+    assert core.landed_url("https://x.org/projects/widget", "Civic Widget") == "https://widget.x.org/"
+
+
+def test_a_same_host_move_is_trusted_before_the_parked_check(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"http://x.org/": ("<p>This domain is for sale.</p>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"http://x.org/": "https://x.org/"})
+    assert core.landed_url("http://x.org/") == "https://x.org/"
+
+
+def test_og_names_are_read_in_either_order_and_with_apostrophes(monkeypatch):
+    from liveliness import core
+    page = ('<meta content="Bob\'s Widget" property="og:site_name">'
+            "<meta property='og:title' content=\"Bob's Widget home\">")
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": (page, {})})
+    assert core._page_titles("https://x.org/") == ["Bob's Widget", "Bob's Widget home"]
+
+
+def test_sitemap_moves_use_trusted_move():
+    from liveliness import core
+    assert not hasattr(core, "_sitemap_move_trusted")

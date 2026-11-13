@@ -28,7 +28,6 @@ import json
 from html import unescape as html_unescape
 import os
 import re
-import concurrent.futures
 import socket
 import threading
 import time
@@ -183,8 +182,13 @@ def _page_titles(url, html=None):
         html = (_PAGE_CACHE.get(url) or (None, None))[0] or ""
     head = html[:200_000]
     found = re.findall(r"<title[^>]*>([\s\S]*?)</title>", head, re.I)
-    found += re.findall(r'<meta[^>]+property=["\']og:(?:site_name|title)["\'][^>]+content=["\']([^"\']*)',
-                        head, re.I)
+    # Each <meta> tag's attributes, in whatever order and quoting the page
+    # uses, so a content="Bob's Widget" before its property still counts.
+    for tag in re.findall(r"<meta\b[^>]*>", head, re.I):
+        attrs = {k.lower(): v1 if v1 or not v2 else v2
+                 for k, v1, v2 in re.findall(r'([\w:-]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', tag)}
+        if attrs.get("property", "").lower() in ("og:title", "og:site_name") and "content" in attrs:
+            found.append(attrs["content"])
     return [html_unescape(t).strip() for t in found]
 
 
@@ -240,30 +244,34 @@ def _looks_parked(listed, new, html=None):
     return bool(_PARKED_TEXT.search(titles + " " + visible))
 
 
-def _sitemap_move_trusted(listed, top, final, name):
-    """
-    Whether a sitemap address that redirected from `top` to `final`, within
-    one registered domain, is still the listed site's sitemap: the same host,
-    www or not; a move from the front page of the apex into one of its own
-    subdomains; otherwise a sibling or deeper subdomain only when the listed
-    page names the project. Never a move up to a parent host.
-    """
-    th, fh = _site_host(top), _site_host(final)
-    if th == fh:
-        return True
-    if _moves_up(th, fh):
-        return False
-    if th == _registrable(th) and fh.endswith("." + th) and _path_prefix(listed) == "":
-        return True
-    return _page_names_project(listed, name)
-
-
 def _moves_up(listed_host, new_host):
     """True when new_host is an ancestor of listed_host: civiclab.uni.edu to uni.edu."""
     return listed_host != new_host and listed_host.endswith("." + new_host)
 
 
-def trusted_move(listed, new, name=None):
+def _move_trust(listed, new, name=None, check_parked=True, start=None):
+    """
+    Why a move to `new` is trusted: "same" (the same host, www or not, any
+    scheme), "apex" (from the front page of the apex into one of its own
+    subdomains), "name" (the listed page names the project), or None.
+    `start` is where the move began, when that is not the listed address
+    itself, as for a sitemap address that redirected.
+    """
+    sh, nh = _site_host(start or listed), _site_host(new)
+    # The same site is the same site whatever the page says; the parked check
+    # is for moves that leave it.
+    if sh == nh:
+        return "same"
+    if check_parked and _looks_parked(listed, new):
+        return None
+    if _moves_up(sh, nh):
+        return None
+    if sh == _registrable(sh) and nh.endswith("." + sh) and _path_prefix(listed) == "":
+        return "apex"
+    return "name" if _page_names_project(listed, name) else None
+
+
+def trusted_move(listed, new, name=None, check_parked=True, start=None):
     """
     True when `new` is the listed site under another name rather than somebody
     else's site.
@@ -275,21 +283,10 @@ def trusted_move(listed, new, name=None):
     subdomains is the organization redirecting into its own site, and is
     trusted. A move from
     one subdomain to a sibling or deeper one, or to another domain, is trusted
-    only when the page names the project. A parking or for-sale page is never
-    trusted, whatever its domain.
+    only when the page names the project. A move off the site onto a parking
+    or for-sale page is never trusted (check_parked), whatever its domain.
     """
-    if _looks_parked(listed, new):
-        return False
-    lh, nh = _site_host(listed), _site_host(new)
-    if lh == nh:
-        return True
-    if _moves_up(lh, nh):
-        return False
-    # Down from the organization's own front door (the apex or www) into one
-    # of its subdomains is the organization redirecting into its own site.
-    if lh == _registrable(lh) and nh.endswith("." + lh) and _path_prefix(listed) == "":
-        return True
-    return _page_names_project(listed, name)
+    return _move_trust(listed, new, name, check_parked, start) is not None
 
 
 def landed_url(url, name=None):
@@ -300,26 +297,28 @@ def landed_url(url, name=None):
     project's name; without it, only a move within the same host is trusted.
     """
     final = _PAGE_FINAL.get(url)
-    if (not final or not final.lower().startswith(("http://", "https://"))
-            or is_archive_host(final) or not trusted_move(url, final, name)):
+    if not final or not final.lower().startswith(("http://", "https://")) or is_archive_host(final):
+        return url
+    why = _move_trust(url, final, name)
+    if why is None:
         return url
     # A page that now sends visitors to the front page of its own site, or of
     # one of the organization's subdomains, was removed. That front page is
     # the organization's, not the listing's, so it dates nothing here.
-    if (_registrable(_site_host(final)) == _registrable(_site_host(url))
+    # A move the listed page's own name vouches for is the project's new home.
+    if (why != "name" and _registrable(_site_host(final)) == _registrable(_site_host(url))
             and _path_prefix(url) != "" and _path_prefix(final) == ""):
         return url
     return final
 
 
-# A small pool for the timed name lookups (host_resolves with a timeout), so
-# lookups that hang hold at most LOOKUP_WORKERS threads.
+# The timed name lookups (host_resolves with a timeout) run on at most
+# LOOKUP_WORKERS daemon threads at once.
 LOOKUP_WORKERS = 4
-_LOOKUPS = concurrent.futures.ThreadPoolExecutor(max_workers=LOOKUP_WORKERS,
-                                                 thread_name_prefix="lookup")
-# A free worker, taken before a lookup is handed over and given back when it
-# ends. With every worker held by a hung lookup, the answer is "unknown" at
-# once rather than a place in a queue.
+# A slot, taken before a lookup thread starts and given back when the lookup
+# ends, however it ends. With every slot held by a hung lookup, the answer is
+# "unknown" at once rather than a place in a queue. The threads are daemons,
+# so a lookup still hanging cannot hold up the end of a run.
 _LOOKUP_SLOTS = threading.BoundedSemaphore(LOOKUP_WORKERS)
 
 
@@ -723,8 +722,8 @@ def host_resolves(url, timeout=None):
     """
     False only when the hostname genuinely does not resolve.
 
-    With `timeout`, the lookup runs on the lookup pool and is given up
-    after that many seconds, or not started when every worker is busy, since request timeouts do not cover it and a
+    With `timeout`, the lookup runs on a daemon thread and is given up after
+    that many seconds, or not started when every lookup slot is busy, since request timeouts do not cover it and a
     lookup that hangs can take half a minute. Given up, or failing, the answer
     is None: unknown. The public-resolver check is skipped then, to keep to
     the time.
@@ -744,19 +743,20 @@ def host_resolves(url, timeout=None):
     if timeout is not None:
         if not _LOOKUP_SLOTS.acquire(blocking=False):
             return None
+        done, result = threading.Event(), {}
 
         def look():
             try:
-                return socket.getaddrinfo(host, None)
+                socket.getaddrinfo(host, None)
+                result["ok"] = True
+            except Exception:
+                result["ok"] = False
             finally:
                 _LOOKUP_SLOTS.release()
-        future = _LOOKUPS.submit(look)
-        try:
-            future.result(timeout=max(timeout, 0))
-            return True
-        except Exception:
-            future.cancel()
-            return None
+                done.set()
+        threading.Thread(target=look, daemon=True, name="lookup").start()
+        done.wait(max(timeout, 0))
+        return True if result.get("ok") else None
     try:
         socket.getaddrinfo(host, None)
         return True
@@ -2417,7 +2417,7 @@ def sitemap_newest_entry(entries, now, prefix="", hosts=None, builds=None):
     # same thing at a coarser grain: a generator that writes only the day.
     if dated:
         stamp, count = Counter(k for _, k, _, _ in dated).most_common(1)[0]
-        if enough(stamp, len(dated)) and count >= SITEMAP_BUILD_SHARE * len(dated):
+        if enough(stamp, count) and count >= SITEMAP_BUILD_SHARE * len(dated):
             set_aside(lambda d, k: k != stamp)
     if len(dated) >= SITEMAP_BIG_DAY_MIN:
         day, count = Counter(d.date() for d, _, _, _ in dated).most_common(1)[0]
@@ -2485,8 +2485,9 @@ def sitemap_date(url, now, deadline=None, landed=None, name=None):
             return None
         hosts.add(_site_host(landed))
         p = lp
+        # On a move to another host, the whole new site is the project's.
         if _site_host(landed) != _site_host(url):
-            prefix = _path_prefix(landed)
+            prefix = ""
     root = "%s://%s" % (p.scheme or "https", p.netloc)
     deadline = min(time.monotonic() + SITEMAP_DEADLINE_S,
                    deadline if deadline is not None else float("inf"))
@@ -2522,14 +2523,15 @@ def sitemap_date(url, now, deadline=None, landed=None, name=None):
             continue
         visited.update((top, final))
         # Where the site's own sitemap address redirected is the site too, when
-        # it stays within the same registered domain and does not go up to a
-        # parent host, which would be the parent's list. The project's homepage
-        # title cannot vouch for it: that page says nothing about the domain
-        # the sitemap went to. A sitemap robots.txt names on some other host
-        # does not make that host this site.
+        # it stays within the same registered domain and trusted_move accepts
+        # it from the sitemap's address: the same host, the apex's own
+        # subdomain from a front-page listing, or a sibling when the listed
+        # page names the project; never up to a parent host. The page it
+        # landed on, not the homepage, is checked for parking. A sitemap
+        # robots.txt names on some other host does not make that host this site.
         if (_site_host(top) in hosts
                 and _registrable(_site_host(final)) == _registrable(_site_host(top))
-                and _sitemap_move_trusted(url, top, final, name)
+                and trusted_move(url, final, name, check_parked=False, start=top)
                 and not _looks_parked(url, final, html=text)):
             hosts.add(_site_host(final))
         # Every entry under one top sitemap is judged together, so a generator
@@ -3737,12 +3739,14 @@ def score_project(project, budget_s=None):
     # live site the bonus a recent dated signal does, and it is not reported as
     # the project's last activity.
     last_date = max((c.date for c in candidates if c.source not in (WAYBACK, BUILD)), default=None)
-    # The website bonus, its wording and whether Status may say Active all
-    # follow the signal that set the score. A three-year-old commit beside a
-    # winning sitemap date does not make the sitemap's score the project's own.
+    # Whether Status may say Active follows the signal that set the score. A
+    # three-year-old commit beside a winning sitemap date does not make the
+    # sitemap's score the project's own.
     winner = max(candidates, key=lambda c: (c.score, c.date)) if candidates else None
-    bonus_date = (winner.date if winner is not None and winner.source not in (WAYBACK, BUILD)
-                  else None)
+    # The website bonus counts the newest dated signal, as before, unless the
+    # signal that set the score is the archive's or a publish.
+    bonus_date = (None if winner is not None and winner.source in (WAYBACK, BUILD)
+                  else last_date)
 
     score = float(best_score)
 
