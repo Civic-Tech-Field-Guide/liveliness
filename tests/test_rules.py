@@ -1362,9 +1362,9 @@ def test_a_move_to_another_organizations_domain_is_not_trusted(monkeypatch):
     # The same organization's other host is trusted.
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://www.x.org/home"})
     assert core.landed_url("https://x.org/", project_name) == "https://www.x.org/home"
-    # A deeper subdomain needs the name, and this page does not carry it.
+    # Down from the apex into its own subdomain is trusted without the name.
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.co.uk/": "https://new.x.co.uk/"})
-    assert core.landed_url("https://x.co.uk/", project_name) == "https://x.co.uk/"
+    assert core.landed_url("https://x.co.uk/", project_name) == "https://new.x.co.uk/"
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://a.co.uk/": "https://b.co.uk/"})
     assert core.landed_url("https://a.co.uk/", project_name) == "https://a.co.uk/"
     # A new domain whose page names the project is the project moved.
@@ -2028,12 +2028,12 @@ def test_a_move_up_to_the_parent_site_is_never_trusted(monkeypatch):
     # www and no-www, and the same host, are the same site.
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://www.x.org/"})
     assert core.landed_url("https://x.org/") == "https://www.x.org/"
-    # A deeper or sibling subdomain needs the project's name.
-    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Something else</title>", {})})
-    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://portal.x.org/"})
-    assert core.landed_url("https://x.org/", "Civic Widget") == "https://x.org/"
-    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Civic Widget portal</title>", {})})
-    assert core.landed_url("https://x.org/", "Civic Widget") == "https://portal.x.org/"
+    # A sibling subdomain needs the project's name.
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://blog.x.org/": ("<title>Something else</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://blog.x.org/": "https://portal.x.org/"})
+    assert core.landed_url("https://blog.x.org/", "Civic Widget") == "https://blog.x.org/"
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://blog.x.org/": ("<title>Civic Widget portal</title>", {})})
+    assert core.landed_url("https://blog.x.org/", "Civic Widget") == "https://portal.x.org/"
 
 
 def test_a_page_that_redirects_to_its_sites_root_was_removed(monkeypatch):
@@ -2111,3 +2111,14 @@ def test_the_sitemap_body_says_what_kind_it_is(monkeypatch):
     text, final, kind = core._sitemap_body("https://x.org/sitemap.xml", time.monotonic() + 10)
     assert kind == "sitemapindex"
     assert not hasattr(core, "sitemap_newest_date")
+
+
+def test_a_move_down_from_the_apex_into_a_subdomain_is_trusted(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://www.x.org/": ("<title>XP Portal</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://www.x.org/": "https://portal.x.org/"})
+    assert core.landed_url("https://www.x.org/") == "https://portal.x.org/"
+    # Sibling to sibling still needs the name.
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://blog.x.org/": ("<title>XP Portal</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://blog.x.org/": "https://portal.x.org/"})
+    assert core.landed_url("https://blog.x.org/") == "https://blog.x.org/"

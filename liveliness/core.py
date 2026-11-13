@@ -252,7 +252,9 @@ def trusted_move(listed, new, name=None):
     The same host, with or without www, is the same site. A move up to a
     parent host (civiclab.uni.edu to www.uni.edu) is never trusted: that is
     the parent's site, and it would date the project by the parent's news. A
-    move to a deeper or sibling subdomain, or to another domain, is trusted
+    move down from the apex or www host into one of its subdomains is the
+    organization redirecting into its own site, and is trusted. A move from
+    one subdomain to a sibling or deeper one, or to another domain, is trusted
     only when the page names the project. A parking or for-sale page is never
     trusted, whatever its domain.
     """
@@ -263,6 +265,10 @@ def trusted_move(listed, new, name=None):
         return True
     if _moves_up(lh, nh):
         return False
+    # Down from the organization's own front door (the apex or www) into one
+    # of its subdomains is the organization redirecting into its own site.
+    if lh == _registrable(lh) and nh.endswith("." + lh):
+        return True
     return _page_names_project(listed, name)
 
 
