@@ -892,7 +892,9 @@ def test_build_stamps_are_judged_across_a_whole_sitemap_index(monkeypatch):
         for j in range(2)) + '</urlset>')
     _fake_web(monkeypatch, core, dict({"https://x.org/sitemap.xml": index},
                                       **{"https://x.org/s%d.xml" % i: child(i) for i in range(3)}))
-    assert core.sitemap_date("https://x.org/", _now()) is None
+    # One pass across the children: a publish, never a page's own date.
+    found = core.sitemap_date("https://x.org/", _now())
+    assert found is not None and found.build
 
 
 def test_a_page_named_by_its_query_or_fragment_skips_the_sitemap(monkeypatch):
@@ -1081,3 +1083,84 @@ def test_robots_sitemaps_returns_only_the_list(monkeypatch):
     from liveliness import core
     _fake_web(monkeypatch, core, {"https://x.org/robots.txt": "Sitemap: https://x.org/s.xml\n"})
     assert core._robots_sitemaps("https://x.org", time.monotonic() + 10) == ["https://x.org/s.xml"]
+
+
+# ── Measured on live listings ─────────────────────────────────────────────────
+
+def _churny_rows(now, n=12):
+    # A capture every three weeks over the last eight months, each with its own
+    # hash, which is what most maintained pages look like in the archive.
+    from datetime import timedelta
+    return [[(now - timedelta(days=21 * (n - i))).strftime("%Y%m%d%H%M%S"), "H%d" % i, "40000",
+             "200", "text/html"] for i in range(n)]
+
+
+def test_a_churning_hash_falls_back_to_comparing_the_text(monkeypatch):
+    from liveliness import core
+    now = _now()
+    rows = _churny_rows(now)
+    monkeypatch.setattr(core, "_cdx", lambda params: rows)
+    old = {"civic", "theatre", "workshop", "spring", "season"} | {"word%s" % c for c in "abcdefghijkl"}
+    new = {"civic", "theatre", "workshop", "autumn", "festival"} | {"term%s" % c for c in "abcdefghijkl"}
+    # The text changed at capture 8: every capture from there on reads `new`.
+    monkeypatch.setattr(core, "_archived_words",
+                        lambda ts, target: new if ts >= rows[8][0] else old)
+    dt = core.wayback_change_date("https://x.org/", now)
+    assert dt is not None and dt.strftime("%Y%m%d%H%M%S") == rows[8][0]
+
+
+def test_a_churning_hash_with_unchanged_text_dates_nothing(monkeypatch):
+    from liveliness import core
+    now = _now()
+    monkeypatch.setattr(core, "_cdx", lambda params: _churny_rows(now))
+    same = {"word%d" % i for i in range(60)}
+    monkeypatch.setattr(core, "_archived_words", lambda ts, target: same)
+    assert core.wayback_change_date("https://x.org/", now) is None
+
+
+def test_an_unreadable_or_walled_capture_dates_nothing(monkeypatch):
+    from liveliness import core
+    now = _now()
+    monkeypatch.setattr(core, "_cdx", lambda params: _churny_rows(now))
+    monkeypatch.setattr(core, "_archived_words", lambda ts, target: None)
+    assert core.wayback_change_date("https://x.org/", now) is None
+
+
+def test_archived_words_refuse_a_bot_wall(monkeypatch):
+    from liveliness import core
+    wall = "<html><body><h1>Just a moment...</h1>" + "<p>Checking your browser before accessing</p>" * 10 + "</body></html>"
+    monkeypatch.setattr(core, "_wayback_get", lambda url, params=None: _FakeResponse(url, wall))
+    assert core._archived_words("20260101000000", "x.org/") is None
+
+
+def test_a_language_root_is_the_whole_site():
+    from liveliness import core
+    assert core._path_prefix("https://mcube-cluster.de/en/") == ""
+    assert core._path_prefix("https://x.org/pt-br/") == ""
+    assert core._path_prefix("https://x.org/labs/") == "/labs"
+
+
+def test_a_recent_whole_site_publish_counts_as_weak_evidence(monkeypatch):
+    from datetime import timedelta
+    from liveliness import core
+    now = _now()
+    base = now - timedelta(days=3)
+    stamps = [(base + timedelta(seconds=8 * i)).strftime("%Y-%m-%dT%H:%M:%S.000Z") for i in range(9)]
+    body = ('<urlset><url><loc>https://x.org</loc></url>' + "".join(
+        '<url><loc>https://x.org/p%d</loc><lastmod>%s</lastmod></url>' % (i, s)
+        for i, s in enumerate(stamps)) + '</urlset>')
+    _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": body})
+    found = core.sitemap_date("https://x.org/", now)
+    assert found is not None and found.build and found[0].date() == base.date()
+
+
+def test_a_publish_scores_like_an_archive_change(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    when = datetime.now(timezone.utc) - timedelta(days=3)
+    monkeypatch.setattr(core, "sitemap_date",
+                        lambda u, now: core.SitemapFind(when, "https://x.org/sitemap.xml", build=True))
+    r = core.score_project(Project(name="x", website="https://x.org/"))
+    assert r["score"] == 50 and r["status"] is None and r["last_activity_date"] is None
+    assert core.SITEMAP_BUILD_LABEL in r["breakdown"]

@@ -121,7 +121,7 @@ The scorer skips both when the site did not respond, the page has moved or the a
 
 **Sitemap.** The scorer reads the sitemaps named in the site's `robots.txt` first, then `/sitemap.xml`, `/sitemap_index.xml` and `/wp-sitemap.xml`, and uses the first one with a date. It follows a sitemap index two levels down and reads up to four child sitemaps from each. It reads children named for the listing's section first, such as `lab-sitemap.xml` for a page under `/lab/`, then the newest, and judges all the entries under one index together. The whole search stops at eight requests or 25 seconds.
 
-When the address points to a section of a site, only entries at or under that address count. The lab's own pages date a lab's page on a university site, not the university's news. The scorer skips entries on another site, because `robots.txt` can name someone else's sitemap. It keeps entries on the host the homepage redirects to, so it can read a site that moved under its new name. Where `robots.txt` itself redirects doesn't count.
+When the address points to a section of a site, only entries at or under that address count. A language root such as `/en/` or `/pt-br/` is the whole site, because many sitemaps list only the default language's pages. The lab's own pages date a lab's page on a university site, not the university's news. The scorer skips entries on another site, because `robots.txt` can name someone else's sitemap. It keeps entries on the host the homepage redirects to, so it can read a site that moved under its new name. Where `robots.txt` itself redirects doesn't count.
 
 The scorer skips the sitemap when a query string picks out the page, such as `project.php?id=12`, because it can't tell which entry is that page. It asks the Wayback Machine about the address with its query. When the homepage redirects, it asks about the page the homepage lands on. For a `#/` or `#!/` route it skips both sources, because the browser builds that page and the archive only sees the shell.
 
@@ -130,16 +130,17 @@ The newest `lastmod` counts like a date the page gives for itself, but only if i
 Three kinds of `lastmod` don't count:
 
 - A date of today or yesterday, because a sitemap generated on each request stamps every entry with the request time.
-- One bare date, or one run of times, on at least 80% of five or more entries, because a generator wrote those entries in one pass. Times on the same day count as one run while each is within two minutes of the one before. The scorer sets them aside even when they are the newest, and dates the site from the rest, if anything is left.
+- One bare date, or one run of times, on at least 80% of five or more entries, because a generator wrote those entries in one pass. Times on the same day count as one run while each is within two minutes of the one before. The scorer sets them aside even when they are the newest, and dates the site from the rest, if anything is left. If nothing is left and the pass is within the last year, it counts as a publish of the whole site: someone is keeping the site up. A publish scores 45, the same as a Wayback Machine change, never earns the points for a responding website, and isn't reported as the last activity date.
 - A day whose times carry at least 80% of five or more entries when another entry is newer. That day is an old rebuild of the site, so the scorer sets those entries aside and dates the site from the rest. If that day is the newest thing in the file, it is a recent deploy and counts.
 
 **Wayback Machine.** The Internet Archive stores a hash of each capture, so a new hash means the content changed. The scorer asks for the 40 most recent captures of the address, keeps the newest 20 and needs at least six. It counts revisits, where the archive saw the same content again. It drops captures that aren't HTML and archived records under 400 bytes, which are usually the archive hitting a bot check or a redirect. The archive later getting past the check is not the site changing.
 
 The first capture of the current content dates the last change. The scorer uses it only if both that capture and the one before it fall within the last year. The archive's capture schedule is too weak evidence to call a project stopped, and after a long gap between captures the change could have come at any point in it. The scorer ignores a page that didn't change across those captures, because its last change came before them.
 
+Most maintained pages get a new hash on nearly every capture, from a form token, a rotating banner or two versions the server alternates between. When over half the recent captures differ from the one before, or the page flips back to an earlier version, the hashes can't date a change, so the scorer reads the archived pages themselves. It compares the words on the newest capture with earlier captures from the last year, stepping back further each time, then narrows the gap. A change needs at least 10 different words, so digits, dates and counters don't count. The first capture of the current text dates the change. It reads at most six archived pages, skips any that are bot checks or have fewer than 30 words, and counts nothing if the text didn't change within the year.
+
 The scorer doesn't use the archive when:
 
-- Over half the recent captures differ from the one before, or the page flips back to an earlier version. A rotating banner, a form token or a clock changes those pages on every capture.
 - The page builds its text in the browser, because its script file gets a new name on every deploy.
 - A footer copyright from this year or last already sets the same floor.
 
