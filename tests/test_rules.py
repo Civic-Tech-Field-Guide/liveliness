@@ -1823,10 +1823,10 @@ def test_a_request_we_cut_short_does_not_count_toward_the_pause(monkeypatch):
     for _ in range(3):
         core._cdx({"url": "x.org/"}, deadline=time.monotonic() + 4)
     assert asked == [] and core._wayback_paused_till == 0.0
-    # With time for one (after the four-second spacing), the search gets at
-    # least five seconds, and counts.
+    # With time for one (the four-second spacing, then three five-second
+    # timeouts and a short body), the search gets at least five seconds, and counts.
     for _ in range(2):
-        core._cdx({"url": "x.org/"}, deadline=time.monotonic() + 12)
+        core._cdx({"url": "x.org/"}, deadline=time.monotonic() + 24)
     assert all(t >= core.WAYBACK_PAUSE_MIN_TIMEOUT_S for t in asked)
     assert core._wayback_paused_till > time.monotonic()
 
@@ -2053,9 +2053,9 @@ def test_an_old_signal_does_not_keep_the_last_resorts_away(monkeypatch):
 
 def test_default_ports_and_path_case_do_not_split_a_site():
     from liveliness import core
-    assert core._same_site("https://x.org:443/a", {"x.org"})
-    assert core._same_site("http://x.org:80/a", {"x.org"})
-    assert core._within("https://x.org/Labs/Civic/page", "/labs/civic")
+    assert core._host_key("x.org:443") == "x.org"
+    assert core._host_key("www.x.org:80") == "x.org"
+    assert core._path_within("/Labs/Civic/page", "/labs/civic")
 
 
 def test_a_language_root_is_skipped_when_picking_the_section():
@@ -2582,3 +2582,78 @@ def test_a_lastmod_with_an_offset_dates_the_utc_day():
 def test_one_trust_function():
     from liveliness import core
     assert not hasattr(core, "_move_trust")
+
+
+# ── Review of 075b65f ─────────────────────────────────────────────────────────
+
+def test_a_rendered_shell_that_reads_parked_is_not_dated(monkeypatch):
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    monkeypatch.setattr(core, "get_page_cached", lambda u: ("<html><body><div id=app></div></body></html>", {}))
+    monkeypatch.setattr(core, "render_page_text", lambda u: "This domain is for sale. " * 12)
+    def never(*a, **k):
+        raise AssertionError("a parked page built in the browser is not dated")
+    monkeypatch.setattr(core, "sitemap_date", never)
+    monkeypatch.setattr(core, "wayback_change_date", never)
+    core.score_project(Project(name="x", website="https://x.org/"))
+
+
+def test_a_shared_host_is_not_an_apex_that_owns_its_subdomains(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://medium.com/": ("<title>Medium</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://medium.com/": "https://evil.medium.com/"})
+    assert core.landed_url("https://medium.com/") == "https://medium.com/"
+
+
+def test_a_deep_listing_under_a_language_root_matches_with_or_without_it(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {})
+    body = ('<urlset><url><loc>https://x.org/labs/civic/a</loc><lastmod>2026-09-01</lastmod></url>'
+            '<url><loc>https://x.org/other</loc><lastmod>2026-10-01</lastmod></url></urlset>')
+    _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": body})
+    found = core.sitemap_date("https://x.org/en/labs/civic", _now())
+    assert found is not None and found.date.month == 9
+
+
+def test_midnight_stamps_are_keyed_by_their_utc_day():
+    from liveliness import core
+    assert core._build_passes(["2026-06-01T00:00:00+02:00"]) == [("d", "2026-05-31")]
+
+
+def test_an_archive_search_starts_only_when_its_worst_case_fits(monkeypatch):
+    import time
+    import requests
+    from liveliness import core
+    monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
+    monkeypatch.setattr(core, "_wayback_last_call", 0.0)
+    monkeypatch.setattr(core, "_wayback_timeouts", 0)
+    asked = []
+    monkeypatch.setattr(core.SESSION, "get", lambda url, timeout=None, **k: asked.append(1) or (_ for _ in ()).throw(requests.Timeout()))
+    core._cdx({"url": "x.org/"}, deadline=time.monotonic() + 12)
+    assert asked == []
+    core._cdx({"url": "x.org/"}, deadline=time.monotonic() + 20)
+    assert asked == [1]
+
+
+def test_one_copy_of_the_sitemap_entry_filters():
+    from liveliness import core
+    assert not hasattr(core, "_within") and not hasattr(core, "_same_site")
+
+
+def test_one_helper_counts_archive_failures(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
+    monkeypatch.setattr(core, "_wayback_timeouts", 0)
+    core._note_wayback_failure("test")
+    assert core._wayback_paused_till == 0.0
+    core._note_wayback_failure("test")
+    assert core._wayback_paused_till > core.time.monotonic()
+
+
+def test_landed_url_takes_check_parked(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<p>This domain is for sale.</p>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://www.x.org/"})
+    assert core.landed_url("https://x.org/") == "https://x.org/"
+    assert core.landed_url("https://x.org/", check_parked=False) == "https://www.x.org/"

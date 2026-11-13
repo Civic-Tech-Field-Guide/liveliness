@@ -222,7 +222,11 @@ def trusted_move(listed, new, check_parked=True, start=None):
         return False
     if sh == nh:
         return True
-    return sh == _registrable(sh) and nh.endswith("." + sh) and _path_prefix(listed) == ""
+    # Down from the apex only when the apex is a registered domain someone
+    # owns: medium.com or github.io is a host for many owners, and a move to
+    # one of its subdomains is a move to someone else's site.
+    return (sh == _registrable(sh) and bool(_PSL(sh).domain)
+            and nh.endswith("." + sh) and _path_prefix(listed) == "")
 
 
 # A path segment that is an error page in its own right, whole: /404,
@@ -245,19 +249,17 @@ def _removed_page(url, final):
     return any(_ERROR_SEGMENT.match(seg) for seg in landed.split("/") if seg)
 
 
-def landed_url(url, parked=None):
+def landed_url(url, check_parked=True):
     """
     Where the listed page's own request ended up, or url itself. Only an
     http(s) address that is not an archive, and is the same organization's
-    site (trusted_move), counts as where the site moved. `parked` is the
-    caller's verdict on the landed page, when it already has one.
+    site (trusted_move), counts as where the site moved. A caller that has
+    already ruled out a parked landing passes check_parked=False.
     """
     final = _PAGE_FINAL.get(url)
     if not final or not final.lower().startswith(("http://", "https://")) or is_archive_host(final):
         return url
-    if parked:
-        return url
-    if not trusted_move(url, final, check_parked=parked is None):
+    if not trusted_move(url, final, check_parked=check_parked):
         return url
     # A deep page that now goes up its own path, to a front page or to an
     # error page was removed. Where it lands is the organization's, not the
@@ -2182,18 +2184,21 @@ def _path_prefix(url):
     return "" if _is_language_root(path) else path
 
 
-def _within(loc, prefix):
-    """True when a sitemap entry sits at or under the listed path."""
-    return _path_within(urlparse(loc).path or "", prefix)
-
-
 def _path_within(path, prefix):
-    """True when a path sits at or under the listed path, case aside."""
+    """
+    True when a path sits at or under the listed path, case aside. A listed
+    path under a language root (/en/labs/civic) also takes entries under the
+    same path without it (/labs/civic), since a sitemap often lists only the
+    default language.
+    """
     if not prefix:
         return True
     path = path.rstrip("/").lower()
-    prefix = prefix.lower()
-    return path == prefix or path.startswith(prefix + "/")
+    prefixes = {prefix.lower()}
+    segments = [x for x in prefix.lower().split("/") if x]
+    if len(segments) > 1 and _is_language_root("/" + segments[0]):
+        prefixes.add("/" + "/".join(segments[1:]))
+    return any(path == p or path.startswith(p + "/") for p in prefixes)
 
 
 _TRACKING_PARAM = re.compile(r"^(?:utm_\w+|fbclid|gclid|mc_cid|mc_eid|ref|source)$", re.I)
@@ -2240,16 +2245,6 @@ def _site_host(url):
 def _host_key(netloc):
     """A netloc without a leading www or a default port, lower case."""
     return re.sub(r":(?:80|443)$", "", netloc.lower()).removeprefix("www.")
-
-
-def _same_site(loc, hosts):
-    """
-    True when a sitemap entry is on the listed site. `hosts` is the listed host
-    and any host the site redirected to, or empty for any.
-    """
-    if not hosts:
-        return True
-    return _site_host(loc) in hosts
 
 
 # Where a candidate date came from: the project's own evidence, or one of the
@@ -2316,8 +2311,11 @@ def _build_passes(mods):
     for i, mod in enumerate(mods):
         # A time of exactly midnight, with any offset, is a date written as a
         # timestamp: as coarse as a bare date, and judged like one.
-        t = None if _MIDNIGHT.search(mod) else _stamp_time(mod)
-        if t is None:
+        t = _stamp_time(mod)
+        if t is not None and _MIDNIGHT.search(mod):
+            # Its day in UTC, the same day _lastmod_date gives it.
+            keys[i] = ("d", t.date().isoformat())
+        elif t is None:
             m = re.search(r"\d{4}-\d{2}-\d{2}", mod)
             keys[i] = ("d", m.group(0) if m else mod.strip())
         else:
@@ -2661,6 +2659,22 @@ _wayback_paused_till = 0.0
 _wayback_timeouts    = 0
 
 
+def _note_wayback_failure(why):
+    """
+    One failed search that had a fair chance. One is the archive being slow;
+    WAYBACK_TIMEOUTS_TO_PAUSE in a row is the archive struggling, and every
+    later record would wait on it too, so it is left alone for a while.
+    """
+    global _wayback_timeouts, _wayback_paused_till
+    _wayback_timeouts += 1
+    if _wayback_timeouts >= WAYBACK_TIMEOUTS_TO_PAUSE:
+        _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
+        _wayback_timeouts = 0
+        _log(f"    wayback  → {why}, twice in a row; not asked again for a while")
+    else:
+        _log(f"    wayback  → {why}")
+
+
 def _wayback_get(url, params=None, deadline=None, count_failure=True):
     """
     One request to the archive, spaced and paused as the archive asks, or None
@@ -2683,14 +2697,16 @@ def _wayback_get(url, params=None, deadline=None, count_failure=True):
     nothing about the archive. A 429 pauses whatever the query.
     """
     page = params is None
-    global _wayback_last_call, _wayback_paused_till, _wayback_timeouts
+    global _wayback_last_call, _wayback_paused_till
     now = time.monotonic()
     if now < _wayback_paused_till:
         return None
     wait = max(_wayback_last_call + WAYBACK_MIN_INTERVAL_S - now, 0)
-    # A search needs WAYBACK_PAUSE_MIN_TIMEOUT_S to be a fair try, so it is not
-    # started with less left; a page read needs only a couple of seconds.
-    least = 2 if page else WAYBACK_PAUSE_MIN_TIMEOUT_S
+    # A search gets at least WAYBACK_PAUSE_MIN_TIMEOUT_S, so it is started only
+    # when that timeout's worst case (three of them and the shortest body
+    # deadline) still fits before the deadline. A page read needs a couple of
+    # seconds. Either way a skipped request does not count as a failure.
+    least = 2 if page else 3 * WAYBACK_PAUSE_MIN_TIMEOUT_S + 0.5
     if deadline is not None and deadline - now - wait < least:
         return None
     if wait > 0:
@@ -2711,17 +2727,8 @@ def _wayback_get(url, params=None, deadline=None, count_failure=True):
     try:
         r = get_within(url, deadline, WAYBACK_TIMEOUT_S, timeout=timeout)
     except Exception:
-        if page or not count_failure or not full_timeout:
-            return None
-        # One slow answer is the archive being slow. Two in a row is the
-        # archive struggling, and every later record would wait on it too.
-        _wayback_timeouts += 1
-        if _wayback_timeouts >= WAYBACK_TIMEOUTS_TO_PAUSE:
-            _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
-            _wayback_timeouts = 0
-            _log("    wayback  → no answer twice; not asked again for a while")
-        else:
-            _log("    wayback  → no answer")
+        if not page and count_failure and full_timeout:
+            _note_wayback_failure("no answer")
         return None
     if page and r.status_code != 429:
         return r if r.status_code == 200 else None
@@ -2729,12 +2736,9 @@ def _wayback_get(url, params=None, deadline=None, count_failure=True):
         # A server error counts once toward the pause, like a request that got
         # no answer; it takes two in a row.
         if count_failure and full_timeout:
-            _wayback_timeouts += 1
-            if _wayback_timeouts >= WAYBACK_TIMEOUTS_TO_PAUSE:
-                _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
-                _wayback_timeouts = 0
-                _log(f"    wayback  → server error twice ({r.status_code}); not asked again for a while")
+            _note_wayback_failure("server error %d" % r.status_code)
         return None
+    global _wayback_timeouts
     _wayback_timeouts = 0
     if r.status_code == 429:
         _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
@@ -3698,6 +3702,9 @@ def score_project(project, budget_s=None):
                     page_unreadable = False
                     _log(f"    render   → {len(rendered)} chars of text")
 
+            if rendered and not page_unreadable:
+                # A shell the browser filled in: its words are the page's.
+                homepage_text = rendered
             page_signals = page_date_signals(page_html, page_headers, now, text=rendered)
             if page_signals:
                 pdt, plabel = max(page_signals, key=lambda c: c[0])
@@ -3767,7 +3774,9 @@ def score_project(project, budget_s=None):
         stage = time.monotonic() + LAST_RESORTS_S
         lr_deadline = deadline if deadline is not None else stage
         # Where the homepage moved, worked out once for both last resorts.
-        landed = landed_url(website_url, parked=parked)
+        # The parked verdict is already settled above, and the last resorts
+        # only run on a page that is not parked.
+        landed = landed_url(website_url, check_parked=False)
         if website_alive is True and site_verdict == "ok":
             # The sitemap gets SITEMAP_SHARE_S of it at most, so the archive's
             # reads, four seconds apart, still fit in what is left.
