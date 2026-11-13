@@ -146,17 +146,43 @@ def _norm_name(text):
     return re.sub(r"[^\w]+", " ", (text or "").lower()).strip()
 
 
+# Words that say what kind of thing a project is rather than which one, so
+# "Delphi AI" is matched by a page titled "Delphi".
+_GENERIC_NAME_WORDS = {
+    "the", "a", "an", "of", "and", "for", "ai", "app", "apps", "project", "projects",
+    "inc", "llc", "ltd", "org", "co", "com", "io", "net", "foundation", "initiative",
+    "platform", "network", "lab", "labs", "hq", "online", "official", "website", "site",
+}
+
+
+def _distinctive_name(name):
+    """The project name less generic words, or "" when no word of 4+ letters is left."""
+    words = [w for w in _norm_name(name).split() if w not in _GENERIC_NAME_WORDS]
+    if not any(len(w) >= 4 for w in words):
+        return ""
+    return " ".join(words)
+
+
 def _page_names_project(url):
-    """True when the cached page at url names the project in its title or site name."""
-    name = _norm_name(_PROJECT_NAME)
-    if not name:
+    """
+    True when the cached page at url names the project in its title or site
+    name: the whole name, or the name less generic words, as long as a word of
+    four or more letters is left to match on.
+    """
+    full = _norm_name(_PROJECT_NAME)
+    if not full:
         return False
+    names = {full, _distinctive_name(_PROJECT_NAME)} - {""}
     html = (_PAGE_CACHE.get(url) or (None, None))[0] or ""
     head = html[:200_000]
     found = re.findall(r"<title[^>]*>([\s\S]*?)</title>", head, re.I)
     found += re.findall(r'<meta[^>]+property=["\']og:(?:site_name|title)["\'][^>]+content=["\']([^"\']*)',
                         head, re.I)
-    return any(name in " %s " % _norm_name(t) or name in _norm_name(t) for t in found)
+    for t in found:
+        title = " %s " % _norm_name(t)
+        if any(" %s " % n in title for n in names):
+            return True
+    return False
 
 
 def trusted_move(listed, new):
@@ -2100,6 +2126,21 @@ def _build_passes(mods):
     return keys
 
 
+# Pages a CMS creates on install. A date on one says somebody installed the
+# site, or touched a page they never replaced, not that the project is kept up.
+_CMS_DEFAULT_PAGE = re.compile(
+    r"/(?:sample-page|hello-world|hello-world-\d+|uncategorized|category/uncategorized|"
+    r"author/admin|blank|blank-\d+|new-page|new-page-\d+|untitled|untitled-\d+|"
+    r"blog/hello-world|blog/welcome-to-your-blog|welcome-to-your-blog|"
+    r"blog/first-blog-post|example-page|test-page)/?$", re.I)
+
+# A large site restamped in one day is a regeneration even when the stamps
+# spread across the day and fall short of SITEMAP_BUILD_SHARE: a community
+# platform writing 4,577 entries on one day is the platform, not its members.
+SITEMAP_BIG_DAY_MIN   = 1000
+SITEMAP_BIG_DAY_SHARE = 0.5
+
+
 def sitemap_newest_entry(entries, now, prefix="", hosts=None, builds=None):
     """
     (date, source) for the newest believable lastmod among a sitemap's entries,
@@ -2122,6 +2163,8 @@ def sitemap_newest_entry(entries, now, prefix="", hosts=None, builds=None):
         loc, mod = entry[0], entry[1]
         src = entry[2] if len(entry) > 2 else None
         if not mod or not _same_site(loc, hosts) or not _within(loc, prefix):
+            continue
+        if _CMS_DEFAULT_PAGE.search(urlparse(loc).path or ""):
             continue
         dt = _parse_date_loose(mod, now)
         if dt is not None:
@@ -2149,6 +2192,12 @@ def sitemap_newest_entry(entries, now, prefix="", hosts=None, builds=None):
             if builds is not None:
                 builds.append(max((d, s) for d, m, s in dated if m == stamp))
             dated = [(d, m, s) for d, m, s in dated if m != stamp]
+    if len(dated) >= SITEMAP_BIG_DAY_MIN:
+        day, count = Counter(d.date() for d, _, _ in dated).most_common(1)[0]
+        if count >= SITEMAP_BIG_DAY_MIN and count >= SITEMAP_BIG_DAY_SHARE * len(dated):
+            if builds is not None:
+                builds.append(max((d, s) for d, _, s in dated if d.date() == day))
+            dated = [(d, m, s) for d, m, s in dated if d.date() != day]
     if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
         day, count = Counter(d.date() for d, _, _ in dated).most_common(1)[0]
         # Only an older build is set aside. When the build is the newest thing

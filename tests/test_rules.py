@@ -1421,3 +1421,46 @@ def test_the_newest_sitemap_entry_comes_with_its_file():
     entries = [("https://x.org/a", "2026-09-01", "s1.xml"), ("https://x.org/b", "2026-01-01", "s2.xml")]
     assert core.sitemap_newest_entry(entries, _now()) == (datetime(2026, 9, 1, tzinfo=timezone.utc), "s1.xml")
     assert core.SitemapFind._fields == ("date", "source", "build")
+
+
+# ── Follow-ups from the 60-listing rerun ──────────────────────────────────────
+
+def test_cms_default_pages_do_not_date_a_site():
+    from liveliness import core
+    entries = [("https://x.org/sample-page/", "2025-09-12"), ("https://x.org/hello-world/", "2025-09-12"),
+               ("https://x.org/category/uncategorized/", "2025-09-12")]
+    assert core.sitemap_newest_date(entries, _now()) is None
+    entries.append(("https://x.org/about/", "2024-03-01"))
+    assert core.sitemap_newest_date(entries, _now()).year == 2024
+
+
+def test_a_day_with_a_thousand_entries_and_half_the_file_is_a_build():
+    from datetime import datetime, timezone
+    from liveliness import core
+    # Spread over the day, so no single run of times covers 80%.
+    big = [("https://x.org/a%d" % i, "2026-11-08T%02d:%02d:00Z" % (i % 24, (i * 7) % 60))
+           for i in range(1200)]
+    rest = [("https://x.org/b%d" % i, "2026-%02d-15" % (1 + i % 9)) for i in range(1000)]
+    rest.append(("https://x.org/post", "2026-10-01"))
+    dt = core.sitemap_newest_date(big + rest, _now())
+    assert dt == datetime(2026, 10, 1, tzinfo=timezone.utc)
+    # Below a thousand entries the day stands.
+    small = big[:600] + rest[:400]
+    assert core.sitemap_newest_date(small, _now()).date().isoformat() == "2026-11-08"
+
+
+def test_a_name_with_generic_words_dropped_matches_the_new_title(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PROJECT_NAME", "Delphi AI")
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://www.delphi.ai/": ("<title>Delphi | Digital minds</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://www.delphi.ai/": "https://www.delphi.co/"})
+    assert core.landed_url("https://www.delphi.ai/") == "https://www.delphi.co/"
+    # Nothing distinctive left after dropping generic words: no match on that.
+    monkeypatch.setattr(core, "_PROJECT_NAME", "The App Project")
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>App Store</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://other.com/"})
+    assert core.landed_url("https://x.org/") == "https://x.org/"
+    # A short leftover word is too weak on its own.
+    monkeypatch.setattr(core, "_PROJECT_NAME", "Vox AI")
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Vox Media</title>", {})})
+    assert core.landed_url("https://x.org/") == "https://x.org/"
