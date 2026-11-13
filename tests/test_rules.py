@@ -306,7 +306,7 @@ def test_a_sitemap_index_is_followed_to_its_children(monkeypatch):
     seen = _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": index,
                                          "https://x.org/post-sitemap.xml": posts,
                                          "https://x.org/page-sitemap.xml": pages})
-    dt, src, _ = core.sitemap_date("https://x.org/", _now())
+    dt, src, *_ = core.sitemap_date("https://x.org/", _now())
     assert (dt.month, dt.day) == (8, 31) and src.endswith("post-sitemap.xml")
     assert seen == ["https://x.org/robots.txt", "https://x.org/sitemap.xml",
                     "https://x.org/post-sitemap.xml", "https://x.org/page-sitemap.xml"]
@@ -332,7 +332,7 @@ def test_a_sitemap_with_nothing_usable_does_not_end_the_search(monkeypatch):
             '<urlset><url><loc>https://news.example/a</loc><lastmod>2026-11-01</lastmod></url></urlset>',
         "https://x.org/sitemap.xml":
             '<urlset><url><loc>https://x.org/</loc><lastmod>2025-08-01</lastmod></url></urlset>'})
-    dt, src, _ = core.sitemap_date("https://x.org/", _now())
+    dt, src, *_ = core.sitemap_date("https://x.org/", _now())
     assert (dt.year, dt.month) == (2025, 8) and src == "https://x.org/sitemap.xml"
 
 
@@ -347,7 +347,7 @@ def test_a_site_that_redirects_is_dated_by_the_host_it_lands_on(monkeypatch):
             '<urlset><url><loc>https://www.oldname.org/about</loc><lastmod>2026-03-01</lastmod></url>'
             '<url><loc>/team</loc><lastmod>2026-05-01</lastmod></url></urlset>',
             "https://www.oldname.org/sitemap.xml")})
-    dt, src, _ = core.sitemap_date("http://oldname.org/", _now())
+    dt, src, *_ = core.sitemap_date("http://oldname.org/", _now())
     assert (dt.year, dt.month) == (2026, 5) and src == "https://www.oldname.org/sitemap.xml"
 
 
@@ -359,7 +359,7 @@ def test_a_truncated_gzip_sitemap_is_still_read(monkeypatch):
                       % (i, 1 + i % 12) for i in range(3000))
     whole = gzip.compress(('<urlset>%s</urlset>' % entries).encode())
     _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": whole[: len(whole) // 2]})
-    dt, _, _ = core.sitemap_date("https://x.org/", _now())
+    dt, *_ = core.sitemap_date("https://x.org/", _now())
     assert (dt.year, dt.month) == (2025, 12)
 
 
@@ -524,7 +524,7 @@ def test_a_sitemap_that_lists_bare_paths_is_read_as_its_own_site(monkeypatch):
     _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml":
               '<urlset><url><loc>/orgs/a/</loc><lastmod>2026-01-12T22:57:14+00:00</lastmod>'
               '</url></urlset>'})
-    dt, _, _ = core.sitemap_date("https://x.org/", _now())
+    dt, *_ = core.sitemap_date("https://x.org/", _now())
     assert (dt.year, dt.month) == (2026, 1)
 
 
@@ -1029,12 +1029,12 @@ def test_a_moved_homepage_trusts_its_new_host_for_the_sitemap(monkeypatch):
     monkeypatch.setattr(core, "_PAGE_FINAL", {})
     robots = ("Sitemap: https://newname.org/sitemap.xml\n", "https://newname.org/robots.txt")
     theirs = '<urlset><url><loc>https://newname.org/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
-    monkeypatch.setattr(core, "_PROJECT_NAME", "Newname")
+    project_name = "Newname"
     _fake_web(monkeypatch, core, {"https://x.org/": ("<html><title>Newname</title></html>", "https://newname.org/"),
                                   "https://x.org/robots.txt": robots,
                                   "https://newname.org/sitemap.xml": theirs})
     core.get_page_cached("https://x.org/")
-    dt, _, _ = core.sitemap_date("https://x.org/", _now())
+    dt, *_ = core.sitemap_date("https://x.org/", _now(), name=project_name)
     assert (dt.month, dt.day) == (9, 1)
 
 
@@ -1250,11 +1250,11 @@ def test_the_sitemap_is_read_where_the_homepage_landed(monkeypatch):
     monkeypatch.setattr(core, "_PAGE_CACHE", {})
     monkeypatch.setattr(core, "_PAGE_FINAL", {})
     theirs = '<urlset><url><loc>https://newname.org/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
-    monkeypatch.setattr(core, "_PROJECT_NAME", "Newname")
+    project_name = "Newname"
     _fake_web(monkeypatch, core, {"https://x.org/": ("<html><title>Newname</title></html>", "https://newname.org/"),
                                   "https://newname.org/sitemap.xml": theirs})
     core.get_page_cached("https://x.org/")
-    dt, _, _ = core.sitemap_date("https://x.org/", _now())
+    dt, *_ = core.sitemap_date("https://x.org/", _now(), name=project_name)
     assert (dt.month, dt.day) == (9, 1)
 
 
@@ -1316,7 +1316,7 @@ def test_a_redirected_listing_keeps_its_own_path_for_the_sitemap(monkeypatch):
     _fake_web(monkeypatch, core, {"https://x.org/labs/": ("<html></html>", "https://www.x.org/"),
                                   "https://www.x.org/sitemap.xml": body})
     core.get_page_cached("https://x.org/labs/")
-    dt, _, _ = core.sitemap_date("https://x.org/labs/", _now())
+    dt, *_ = core.sitemap_date("https://x.org/labs/", _now())
     assert (dt.month, dt.day) == (9, 1)
 
 
@@ -1348,21 +1348,21 @@ def test_a_carousel_that_changes_every_capture_dates_nothing(monkeypatch):
 
 def test_a_move_to_another_organizations_domain_is_not_trusted(monkeypatch):
     from liveliness import core
-    monkeypatch.setattr(core, "_PROJECT_NAME", "Civic Widget")
+    project_name = "Civic Widget"
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Big Funder Foundation</title>", {})})
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://funder.org/grants"})
-    assert core.landed_url("https://x.org/") == "https://x.org/"
+    assert core.landed_url("https://x.org/", project_name) == "https://x.org/"
     # The same organization's other host is trusted.
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://www.x.org/home"})
-    assert core.landed_url("https://x.org/") == "https://www.x.org/home"
+    assert core.landed_url("https://x.org/", project_name) == "https://www.x.org/home"
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.co.uk/": "https://new.x.co.uk/"})
-    assert core.landed_url("https://x.co.uk/") == "https://new.x.co.uk/"
+    assert core.landed_url("https://x.co.uk/", project_name) == "https://new.x.co.uk/"
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://a.co.uk/": "https://b.co.uk/"})
-    assert core.landed_url("https://a.co.uk/") == "https://a.co.uk/"
+    assert core.landed_url("https://a.co.uk/", project_name) == "https://a.co.uk/"
     # A new domain whose page names the project is the project moved.
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Civic Widget | Home</title>", {})})
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://civicwidget.io/"})
-    assert core.landed_url("https://x.org/") == "https://civicwidget.io/"
+    assert core.landed_url("https://x.org/", project_name) == "https://civicwidget.io/"
 
 
 def test_only_a_page_that_answered_records_where_it_landed(monkeypatch):
@@ -1428,7 +1428,7 @@ def test_the_newest_sitemap_entry_comes_with_its_file():
     from liveliness import core
     entries = [("https://x.org/a", "2026-09-01", "s1.xml"), ("https://x.org/b", "2026-01-01", "s2.xml")]
     assert core.sitemap_newest_entry(entries, _now()) == (datetime(2026, 9, 1, tzinfo=timezone.utc), "s1.xml")
-    assert core.SitemapFind._fields == ("date", "source", "build")
+    assert core.SitemapFind._fields == ("date", "source", "build", "page_date")
 
 
 # ── Follow-ups from the 60-listing rerun ──────────────────────────────────────
@@ -1459,19 +1459,19 @@ def test_a_day_with_a_thousand_entries_and_half_the_file_is_a_build():
 
 def test_a_name_with_generic_words_dropped_matches_the_new_title(monkeypatch):
     from liveliness import core
-    monkeypatch.setattr(core, "_PROJECT_NAME", "Delphi AI")
+    project_name = "Delphi AI"
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://www.delphi.ai/": ("<title>Delphi | Digital minds</title>", {})})
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://www.delphi.ai/": "https://www.delphi.co/"})
-    assert core.landed_url("https://www.delphi.ai/") == "https://www.delphi.co/"
+    assert core.landed_url("https://www.delphi.ai/", project_name) == "https://www.delphi.co/"
     # Nothing distinctive left after dropping generic words: no match on that.
-    monkeypatch.setattr(core, "_PROJECT_NAME", "The App Project")
+    project_name = "The App Project"
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>App Store</title>", {})})
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://other.com/"})
-    assert core.landed_url("https://x.org/") == "https://x.org/"
+    assert core.landed_url("https://x.org/", project_name) == "https://x.org/"
     # A short leftover word is too weak on its own.
-    monkeypatch.setattr(core, "_PROJECT_NAME", "Vox AI")
+    project_name = "Vox AI"
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Vox Media</title>", {})})
-    assert core.landed_url("https://x.org/") == "https://x.org/"
+    assert core.landed_url("https://x.org/", project_name) == "https://x.org/"
 
 
 def test_build_passes_are_judged_on_the_whole_site_not_the_section():
@@ -1489,33 +1489,33 @@ def test_build_passes_are_judged_on_the_whole_site_not_the_section():
 
 def test_a_projects_own_title_does_not_vouch_for_another_domains_sitemap(monkeypatch):
     from liveliness import core
-    monkeypatch.setattr(core, "_PROJECT_NAME", "Civic Widget")
+    project_name = "Civic Widget"
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Civic Widget</title>", {})})
     monkeypatch.setattr(core, "_PAGE_FINAL", {})
     theirs = '<urlset><url><loc>https://other.com/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
     _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": (theirs, "https://other.com/sitemap.xml")})
-    assert core.sitemap_date("https://x.org/", _now()) is None
+    assert core.sitemap_date("https://x.org/", _now(), name=project_name) is None
 
 
 def test_a_parked_or_for_sale_landing_is_never_trusted(monkeypatch):
     from liveliness import core
-    monkeypatch.setattr(core, "_PROJECT_NAME", "Civic Widget")
+    project_name = "Civic Widget"
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://civicwidget.org/": (
         "<title>civicwidget.org is for sale | Civic Widget</title><p>Buy this domain</p>", {})})
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://civicwidget.org/": "https://www.civicwidget.org/lander"})
-    assert core.landed_url("https://civicwidget.org/") == "https://civicwidget.org/"
+    assert core.landed_url("https://civicwidget.org/", project_name) == "https://civicwidget.org/"
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://civicwidget.org/": ("<title>Civic Widget</title>", {})})
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://civicwidget.org/": "https://sedo.com/search/details/?domain=civicwidget.org"})
-    assert core.landed_url("https://civicwidget.org/") == "https://civicwidget.org/"
+    assert core.landed_url("https://civicwidget.org/", project_name) == "https://civicwidget.org/"
 
 
 def test_a_name_match_always_needs_a_distinctive_word(monkeypatch):
     from liveliness import core
     # The whole name matching is not enough without a word of four letters.
-    monkeypatch.setattr(core, "_PROJECT_NAME", "Vox AI")
+    project_name = "Vox AI"
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Vox AI</title>", {})})
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://other.com/"})
-    assert core.landed_url("https://x.org/") == "https://x.org/"
+    assert core.landed_url("https://x.org/", project_name) == "https://x.org/"
 
 
 def test_shared_hosting_tenants_are_separate_sites():
@@ -1539,12 +1539,12 @@ def test_the_text_is_compared_only_when_the_landed_page_is_a_homepage_too(monkey
 
 def test_a_move_to_another_host_takes_its_section_from_where_it_landed(monkeypatch):
     from liveliness import core
-    monkeypatch.setattr(core, "_PROJECT_NAME", "Civic Widget")
+    project_name = "Civic Widget"
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/widget/": ("<title>Civic Widget</title>", {})})
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/widget/": "https://civicwidget.io/"})
     body = '<urlset><url><loc>https://civicwidget.io/news/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
     _fake_web(monkeypatch, core, {"https://civicwidget.io/sitemap.xml": body})
-    dt, _, _ = core.sitemap_date("https://x.org/widget/", _now())
+    dt, *_ = core.sitemap_date("https://x.org/widget/", _now(), name=project_name)
     assert (dt.month, dt.day) == (9, 1)
 
 
@@ -1613,10 +1613,10 @@ def test_names_match_titles_with_their_small_words(monkeypatch):
     from liveliness import core
     for name, title in (("Code for America", "Code for America"),
                         ("Bureau of Investigative Journalism", "The Bureau of Investigative Journalism (en-GB)")):
-        monkeypatch.setattr(core, "_PROJECT_NAME", name)
+        project_name = name
         monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>%s</title>" % title, {})})
         monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://other.com/"})
-        assert core.landed_url("https://x.org/") == "https://other.com/", name
+        assert core.landed_url("https://x.org/", project_name) == "https://other.com/", name
 
 
 def test_a_real_homepage_selling_tickets_is_not_parked(monkeypatch):
@@ -1899,3 +1899,109 @@ def test_a_hanging_name_lookup_does_not_hold_the_sitemap_past_its_deadline(monke
     start = time.monotonic()
     assert core.sitemap_date("https://slow-dns.example/", _now(), deadline=start + 2) is None
     assert time.monotonic() - start <= 3
+
+
+# ── Review of b180128 ─────────────────────────────────────────────────────────
+
+def test_on_the_default_path_a_hanging_archive_is_paused_after_two_searches(monkeypatch):
+    import time
+    import requests
+    from liveliness import core
+    monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
+    monkeypatch.setattr(core, "_wayback_last_call", 0.0)
+    monkeypatch.setattr(core, "_wayback_timeouts", 0)
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    def get(url, timeout=None, **k):
+        raise requests.Timeout("hung")
+    monkeypatch.setattr(core.SESSION, "get", get)
+    for _ in range(2):
+        core.wayback_change_date("https://x.org/", _now(), deadline=time.monotonic() + 40)
+    assert core._wayback_paused_till > time.monotonic()
+
+
+def test_a_server_error_on_the_year_query_does_not_pause_before_the_fallback(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
+    monkeypatch.setattr(core, "_wayback_last_call", 0.0)
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    asked = []
+    def limited(url, **k):
+        asked.append(url)
+        return _FakeResponse(url, "", 503) if "limit=-410" in url else _FakeResponse(url, "[]")
+    monkeypatch.setattr(core, "get_limited", limited)
+    core.wayback_change_date("https://x.org/", _now())
+    assert len(asked) == 2 and core._wayback_paused_till == 0.0
+
+
+def test_an_old_page_date_is_still_reported_when_a_publish_outscores_it(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    now = datetime.now(timezone.utc)
+    build, page = now - timedelta(days=20), now - timedelta(days=450)
+    monkeypatch.setattr(core, "sitemap_date",
+                        lambda u, now, **k: core.SitemapFind(build, "s.xml", build=True, page_date=page))
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: None)
+    r = core.score_project(Project(name="x", website="https://x.org/"))
+    assert r["last_activity_date"] == page.strftime("%Y-%m-%d")
+    assert core.SITEMAP_LABEL in r["breakdown"] and core.SITEMAP_BUILD_LABEL in r["breakdown"]
+
+
+def test_the_public_suffix_list_decides_what_was_registered():
+    from liveliness import core
+    assert core._registrable("news.x.gov.br") == "x.gov.br"
+    assert core._registrable("a.b.x.com.au") == "x.com.au"
+    assert core._registrable("alice.pages.dev") == "alice.pages.dev"
+    assert core._registrable("alice.substack.com") == "alice.substack.com"
+    # A suffix of three labels a hand-made list misses.
+    assert core._registrable("school.k12.ca.us") == "school.k12.ca.us"
+
+
+def test_a_sitemap_redirect_is_judged_on_where_it_landed(monkeypatch):
+    from liveliness import core
+    # The homepage itself reads like a for-sale page; the sitemap it redirects
+    # to, on the same domain, is a real sitemap and is trusted.
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<p>This domain is for sale.</p>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {})
+    body = '<urlset><url><loc>https://blog.x.org/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
+    _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": (body, "https://blog.x.org/sitemap.xml")})
+    found = core.sitemap_date("https://x.org/", _now())
+    assert found is not None and found.date.month == 9
+
+
+def test_no_lookup_for_a_host_the_homepage_already_reached(monkeypatch):
+    import socket
+    from liveliness import core
+    def never(*a, **k):
+        raise AssertionError("already resolved")
+    monkeypatch.setattr(core.socket, "getaddrinfo", never)
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://x.org/"})
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<html></html>", {})})
+    assert core.resolves_within("x.org", 2)
+
+
+def test_hung_lookups_share_one_thread(monkeypatch):
+    import threading
+    import time
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_FINAL", {})
+    monkeypatch.setattr(core.socket, "getaddrinfo", lambda *a, **k: time.sleep(3))
+    before = threading.active_count()
+    for i in range(4):
+        core.resolves_within("slow%d.example" % i, 0.1)
+    assert threading.active_count() - before <= 1
+
+
+def test_request_caps_is_one_number():
+    from liveliness import core
+    assert core.request_caps(40, 10) == 10
+    assert core.request_caps(8, 10) == 2
+
+
+def test_the_project_name_is_passed_not_global(monkeypatch):
+    from liveliness import core
+    assert not hasattr(core, "_PROJECT_NAME")
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Civic Widget</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://civicwidget.io/"})
+    assert core.landed_url("https://x.org/", "Civic Widget") == "https://civicwidget.io/"
+    assert core.landed_url("https://x.org/") == "https://x.org/"

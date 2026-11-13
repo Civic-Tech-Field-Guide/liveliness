@@ -14,6 +14,9 @@ keywords = ["civic tech", "link rot", "project health", "web archiving"]
 dependencies = [
     "requests>=2.31",
     "feedparser>=6.0",
+    # The Public Suffix List, read from its bundled snapshot, to tell one
+    # organization's domain from another's.
+    "tldextract>=5.1",
 ]
 
 [project.optional-dependencies]
