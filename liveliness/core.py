@@ -2158,28 +2158,41 @@ def sitemap_newest_entry(entries, now, prefix="", hosts=None, builds=None):
     somebody edited by hand, date the site. Each pass set aside is added to
     `builds` as (date, source).
     """
+    # Build passes are judged on every entry on the site, then the listing's
+    # section is picked out: a regeneration stamps the whole file, and a
+    # section of a few pages would otherwise slip under every threshold.
     kept = []
     for entry in entries:
         loc, mod = entry[0], entry[1]
         src = entry[2] if len(entry) > 2 else None
-        if not mod or not _same_site(loc, hosts) or not _within(loc, prefix):
+        if not mod or not _same_site(loc, hosts):
             continue
         if _CMS_DEFAULT_PAGE.search(urlparse(loc).path or ""):
             continue
         dt = _parse_date_loose(mod, now)
         if dt is not None:
-            kept.append((dt, mod, src))
-    raws = _build_passes([m for _, m, _ in kept])
+            kept.append((dt, mod, src, _within(loc, prefix)))
+    if not any(ins for _, _, _, ins in kept):
+        return None
+    raws = _build_passes([m for _, m, _, _ in kept])
     # The server's clock, not a change: dropped before anything else is
     # judged, so one such entry cannot make a real build look old.
-    dated = [(dt, key, src) for (dt, _, src), key in zip(kept, raws)
+    dated = [(dt, key, src, ins) for (dt, _, src, ins), key in zip(kept, raws)
              if (now - dt).days >= LAST_MODIFIED_MIN_AGE_DAYS]
+
+    def set_aside(keep):
+        """Drop the entries keep() rejects, noting the newest in-section one as a build."""
+        nonlocal dated
+        gone = [(d, s) for d, k, s, ins in dated if ins and not keep(d, k)]
+        if builds is not None and gone:
+            builds.append(max(gone, key=lambda g: g[0]))
+        dated = [x for x in dated if keep(x[0], x[1])]
+
     # A generator that writes one stamp on every entry, a date or a time, says
     # when the file was built, not when anything changed. Below five entries
     # one sitting of edits can look the same, so it is believed.
     if len(raws) >= SITEMAP_STAMP_MIN_COUNT and len(set(raws)) == 1:
-        if builds is not None and dated:
-            builds.append(max((d, s) for d, _, s in dated))
+        set_aside(lambda d, k: False)
         return None
     # Pages edited by hand are not stamped minutes apart in one run. When one
     # pass covers SITEMAP_BUILD_SHARE of the entries, a generator wrote them,
@@ -2187,29 +2200,25 @@ def sitemap_newest_entry(entries, now, prefix="", hosts=None, builds=None):
     # file, and the rest date the site. A bare date shared that widely is the
     # same thing at a coarser grain: a generator that writes only the day.
     if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
-        stamp, count = Counter(m for _, m, _ in dated).most_common(1)[0]
+        stamp, count = Counter(k for _, k, _, _ in dated).most_common(1)[0]
         if count >= SITEMAP_BUILD_SHARE * len(dated):
-            if builds is not None:
-                builds.append(max((d, s) for d, m, s in dated if m == stamp))
-            dated = [(d, m, s) for d, m, s in dated if m != stamp]
+            set_aside(lambda d, k: k != stamp)
     if len(dated) >= SITEMAP_BIG_DAY_MIN:
-        day, count = Counter(d.date() for d, _, _ in dated).most_common(1)[0]
+        day, count = Counter(d.date() for d, _, _, _ in dated).most_common(1)[0]
         if count >= SITEMAP_BIG_DAY_MIN and count >= SITEMAP_BIG_DAY_SHARE * len(dated):
-            if builds is not None:
-                builds.append(max((d, s) for d, _, s in dated if d.date() == day))
-            dated = [(d, m, s) for d, m, s in dated if d.date() != day]
+            set_aside(lambda d, k: d.date() != day)
     if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
-        day, count = Counter(d.date() for d, _, _ in dated).most_common(1)[0]
+        day, count = Counter(d.date() for d, _, _, _ in dated).most_common(1)[0]
         # Only an older build is set aside. When the build is the newest thing
         # in the file, somebody deployed the site recently, and the two-day
         # rule above already keeps out a sitemap generated per request.
         if (count >= SITEMAP_BUILD_SHARE * len(dated)
-                and day < max(d.date() for d, _, _ in dated)):
-            dated = [(d, m, s) for d, m, s in dated if d.date() != day]
-    if not dated:
+                and day < max(d.date() for d, _, _, _ in dated)):
+            dated = [x for x in dated if x[0].date() != day]
+    mine = [(d, s) for d, _, s, ins in dated if ins]
+    if not mine:
         return None
-    d, _, src = max(dated, key=lambda x: x[0])
-    return d, src
+    return max(mine, key=lambda x: x[0])
 
 
 def sitemap_newest_date(entries, now, prefix="", hosts=None, builds=None):

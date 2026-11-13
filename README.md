@@ -129,7 +129,7 @@ The scorer skips the sitemap when a query string picks out the page, such as `pr
 
 The newest `lastmod` counts like a date the page gives for itself, but only if it is 18 months old or newer. At 18 months it scores 40, and the 5 points for a responding site bring it to 45, the bottom of Likely Active. An older `lastmod` counts for nothing, and the scorer asks the Wayback Machine instead. It also asks the archive when the sitemap's newest date is over a year old, and the higher of the two scores counts.
 
-These `lastmod` values don't count:
+The scorer judges these rules on every entry on the site before it picks out the listing's section, because a regeneration stamps the whole file and a section of a few pages would slip under every threshold. These `lastmod` values don't count:
 
 - A date of today or yesterday, because a sitemap generated on each request stamps every entry with the request time.
 - A date on a page the CMS creates on install, such as WordPress's `/sample-page/` and `/hello-world/`, because it says the site was installed, not kept up.

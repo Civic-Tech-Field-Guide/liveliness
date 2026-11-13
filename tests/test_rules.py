@@ -1464,3 +1464,14 @@ def test_a_name_with_generic_words_dropped_matches_the_new_title(monkeypatch):
     monkeypatch.setattr(core, "_PROJECT_NAME", "Vox AI")
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Vox Media</title>", {})})
     assert core.landed_url("https://x.org/") == "https://x.org/"
+
+
+def test_build_passes_are_judged_on_the_whole_site_not_the_section():
+    from liveliness import core
+    # A platform regenerated every entry in one run; the listing is one page of it.
+    entries = [("https://c.example.org/p%d" % i, "2026-11-08T03:%02d:%02dZ" % (i // 60 % 60, i % 60))
+               for i in range(1500)]
+    entries.append(("https://c.example.org/home", "2026-11-08T03:10:00Z"))
+    builds = []
+    assert core.sitemap_newest_entry(entries, _now(), "/home", None, builds) is None
+    assert builds and builds[0][0].date().isoformat() == "2026-11-08"
