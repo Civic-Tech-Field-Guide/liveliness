@@ -1847,8 +1847,7 @@ def test_sitemap_locations_are_xml_unescaped():
 
 def test_titles_are_html_unescaped(monkeypatch):
     from liveliness import core
-    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Caf&eacute; Civique &amp; Co</title>", {})})
-    assert core._page_titles("https://x.org/") == ["Café Civique & Co"]
+    assert core._page_titles("<title>Caf&eacute; Civique &amp; Co</title>") == ["Café Civique & Co"]
 
 
 def test_xhtml_captures_count_as_pages():
@@ -2247,8 +2246,7 @@ def test_og_names_are_read_in_either_order_and_with_apostrophes(monkeypatch):
     from liveliness import core
     page = ('<meta content="Bob\'s Widget" property="og:site_name">'
             "<meta property='og:title' content=\"Bob's Widget home\">")
-    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": (page, {})})
-    assert core._page_titles("https://x.org/") == ["Bob's Widget", "Bob's Widget home"]
+    assert sorted(core._page_titles(page)) == ["Bob's Widget", "Bob's Widget home"]
 
 
 def test_sitemap_moves_use_trusted_move():
@@ -2413,3 +2411,77 @@ def test_the_archive_request_uses_one_timeout(monkeypatch):
     monkeypatch.setattr(core, "get_within", within)
     core._cdx({"url": "x.org/"}, deadline=time.monotonic() + 40)
     assert "timeout" in got
+
+
+# ── Review of 4f7b485 ─────────────────────────────────────────────────────────
+
+def test_a_deep_page_sent_up_its_own_path_or_to_an_error_page_was_removed(monkeypatch):
+    from liveliness import core
+    url = "https://x.org/projects/foo"
+    for final in ("https://x.org/projects/", "https://x.org/", "https://www.x.org/projects",
+                  "https://x.org/404", "https://x.org/page-not-found/", "https://x.org/error.html"):
+        monkeypatch.setattr(core, "_PAGE_CACHE", {url: ("<title>X</title><p>words</p>", {})})
+        monkeypatch.setattr(core, "_PAGE_FINAL", {url: final})
+        assert core.landed_url(url) == url, final
+    # A real move on the same host is still trusted.
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/tools/foo": "https://x.org/projects/foo"})
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/tools/foo": ("<title>X</title>", {})})
+    assert core.landed_url("https://x.org/tools/foo") == "https://x.org/projects/foo"
+
+
+def test_a_licence_line_about_this_domain_is_not_parked(monkeypatch):
+    from liveliness import core
+    page = "<p>All content on this domain is licensed under CC-BY 4.0.</p>"
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": (page, {})})
+    assert not core._looks_parked("https://x.org/", "https://x.org/")
+    for sale in ("This domain is for sale.", "Domain for sale", "Inquire about this domain"):
+        monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<p>%s</p>" % sale, {})})
+        assert core._looks_parked("https://x.org/", "https://x.org/"), sale
+
+
+def test_an_archive_outage_after_a_slow_sitemap_pauses_after_two_records(monkeypatch):
+    import requests
+    from liveliness import core
+    clock = [1000.0]
+    monkeypatch.setattr(core.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(core.time, "sleep", lambda s: clock.__setitem__(0, clock[0] + s))
+    monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
+    monkeypatch.setattr(core, "_wayback_last_call", 0.0)
+    monkeypatch.setattr(core, "_wayback_timeouts", 0)
+    def get(url, timeout=None, **k):
+        clock[0] += timeout[0] if isinstance(timeout, tuple) else timeout
+        raise requests.Timeout("down")
+    monkeypatch.setattr(core.SESSION, "get", get)
+    for _ in range(2):
+        # The sitemap used 15 of the 40 seconds: the archive has 25.
+        core.wayback_change_date("https://x.org/", _now(), deadline=clock[0] + 25)
+    assert core._wayback_paused_till > clock[0]
+
+
+def test_iso_lastmods_take_the_fast_path_and_parsing_stops_at_the_deadline(monkeypatch):
+    import time
+    from datetime import datetime, timezone
+    from liveliness import core
+    def slow(*a, **k):
+        raise AssertionError("ISO dates do not need the loose parser")
+    monkeypatch.setattr(core, "_parse_date_loose", slow)
+    entries = [("https://x.org/a", "2026-09-01T10:00:00+02:00"), ("https://x.org/b", "2026-08-01")]
+    assert core.sitemap_newest_entry(entries, _now())[0] == datetime(2026, 9, 1, tzinfo=timezone.utc)
+    assert core.sitemap_newest_entry(entries, _now(), deadline=time.monotonic() - 1) is None
+
+
+def test_score_project_works_out_the_parked_verdict_once(monkeypatch):
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    page = "<title>X</title>" + "<p>We help cities listen to residents.</p>" * 20
+    def fetch(u):
+        core._PAGE_FINAL[u] = "https://www.x.org/"
+        return page, {}
+    monkeypatch.setattr(core, "get_page_cached", fetch)
+    calls = []
+    real = core._looks_parked
+    monkeypatch.setattr(core, "_looks_parked", lambda *a, **k: calls.append(a) or real(*a, **k))
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: None)
+    core.score_project(Project(name="x", website="https://x.org/"))
+    assert len(calls) == 1
