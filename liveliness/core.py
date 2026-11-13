@@ -134,9 +134,24 @@ _SECOND_LEVEL = {"co", "com", "org", "net", "gov", "ac", "edu", "or", "ne", "go"
                  "gob", "nic", "mil", "sch", "ltd", "plc", "info", "nom", "res"}
 
 
+# Hosts that give each customer a subdomain. Each tenant is its own site, so
+# alice.github.io and bob.github.io are two owners, not one.
+_SHARED_HOSTING = (
+    "github.io", "gitlab.io", "netlify.app", "vercel.app", "pages.dev", "herokuapp.com",
+    "wordpress.com", "blogspot.com", "wixsite.com", "squarespace.com", "webflow.io",
+    "substack.com", "medium.com", "notion.site", "carrd.co", "glitch.me", "fly.dev",
+    "onrender.com", "azurewebsites.net", "web.app", "firebaseapp.com",
+)
+
+
 def _registrable(host):
-    """The part of a host its owner registered: x.org, x.co.uk, x.gov.br."""
-    labels = (host or "").lower().rstrip(".").split(".")
+    """The part of a host its owner registered: x.org, x.co.uk, x.gov.br, x.github.io."""
+    host = (host or "").lower().rstrip(".")
+    for suffix in _SHARED_HOSTING:
+        if host.endswith("." + suffix):
+            tenant = host[: -len(suffix) - 1].split(".")[-1]
+            return tenant + "." + suffix
+    labels = host.split(".")
     if (len(labels) >= 3 and len(labels[-1]) == 2 and labels[-2] in _SECOND_LEVEL):
         return ".".join(labels[-3:])
     return ".".join(labels[-2:])
@@ -163,34 +178,65 @@ def _distinctive_name(name):
     return " ".join(words)
 
 
-def _page_names_project(url):
-    """
-    True when the cached page at url names the project in its title or site
-    name: the whole name, or the name less generic words, as long as a word of
-    four or more letters is left to match on.
-    """
-    full = _norm_name(_PROJECT_NAME)
-    if not full:
-        return False
-    names = {full, _distinctive_name(_PROJECT_NAME)} - {""}
+def _page_titles(url):
+    """The title and og:site_name / og:title of the cached page at url."""
     html = (_PAGE_CACHE.get(url) or (None, None))[0] or ""
     head = html[:200_000]
     found = re.findall(r"<title[^>]*>([\s\S]*?)</title>", head, re.I)
     found += re.findall(r'<meta[^>]+property=["\']og:(?:site_name|title)["\'][^>]+content=["\']([^"\']*)',
                         head, re.I)
-    for t in found:
+    return found
+
+
+def _page_names_project(url):
+    """
+    True when the cached page at url names the project in its title or site
+    name, with generic words dropped, as long as a word of four or more
+    letters is left to match on. A name of short or generic words only never
+    matches: too many pages would.
+    """
+    name = _distinctive_name(_PROJECT_NAME)
+    if not name:
+        return False
+    names = {name}
+    for t in _page_titles(url):
         title = " %s " % _norm_name(t)
         if any(" %s " % n in title for n in names):
             return True
     return False
 
 
+# Where a lapsed domain goes: a registrar's parking page or a marketplace
+# listing it for sale. Such a page can carry the old name in its title.
+_PARKING_HOSTS = ("sedo.com", "sedoparking.com", "dan.com", "afternic.com", "hugedomains.com",
+                  "godaddy.com", "parkingcrew.net", "bodis.com", "above.com", "undeveloped.com",
+                  "domainmarket.com", "buydomains.com", "porkbun.com", "namecheap.com",
+                  "parklogic.com", "uniregistry.com", "atom.com", "squadhelp.com")
+_PARKED_TEXT = re.compile(
+    r"\bfor sale\b|buy this domain|this domain (?:is|may be) (?:for sale|parked|available)|"
+    r"domain (?:is )?parked|parked (?:free|domain)|make an offer|inquire about this domain|"
+    r"domain has expired|renew (?:this|your) domain", re.I)
+
+
+def _looks_parked(listed, new):
+    """True when a move lands on a parking or for-sale page."""
+    host = _site_host(new)
+    if any(host == h or host.endswith("." + h) for h in _PARKING_HOSTS):
+        return True
+    html = (_PAGE_CACHE.get(listed) or (None, None))[0] or ""
+    head = " ".join(_page_titles(listed)) + " " + re.sub(r"<[^>]+>", " ", html[:20_000])
+    return bool(_PARKED_TEXT.search(head))
+
+
 def trusted_move(listed, new):
     """
     True when `new` is the listed site under another name rather than somebody
     else's site: the same registered domain (www, a subdomain), or a page
-    that names the project. A funder's, parent's or parking domain is neither.
+    that names the project. A funder's, parent's or parking domain is neither,
+    and a parking or for-sale page is never trusted, whatever its domain.
     """
+    if _looks_parked(listed, new):
+        return False
     if _registrable(_site_host(new)) == _registrable(_site_host(listed)):
         return True
     return _page_names_project(listed)
@@ -1924,7 +1970,7 @@ def _gunzip_prefix(body):
     """
     As much of a gzip body as unpacks, capped at SITEMAP_MAX_TEXT_BYTES.
 
-    The download stops at MAX_FETCH_BYTES, so a large .xml.gz usually arrives
+    The download stops at SITEMAP_MAX_BYTES, so a large .xml.gz can arrive
     cut short. The entries in the part that did arrive are still good, and a
     small file that unpacks to something huge is cut off rather than held.
     """
@@ -2207,14 +2253,6 @@ def sitemap_newest_entry(entries, now, prefix="", hosts=None, builds=None):
         day, count = Counter(d.date() for d, _, _, _ in dated).most_common(1)[0]
         if count >= SITEMAP_BIG_DAY_MIN and count >= SITEMAP_BIG_DAY_SHARE * len(dated):
             set_aside(lambda d, k: d.date() != day)
-    if len(dated) >= SITEMAP_STAMP_MIN_COUNT:
-        day, count = Counter(d.date() for d, _, _, _ in dated).most_common(1)[0]
-        # Only an older build is set aside. When the build is the newest thing
-        # in the file, somebody deployed the site recently, and the two-day
-        # rule above already keeps out a sitemap generated per request.
-        if (count >= SITEMAP_BUILD_SHARE * len(dated)
-                and day < max(d.date() for d, _, _, _ in dated)):
-            dated = [x for x in dated if x[0].date() != day]
     mine = [(d, s) for d, _, s, ins in dated if ins]
     if not mine:
         return None
@@ -2266,15 +2304,17 @@ def sitemap_date(url, now, deadline=None):
     if _identifying_query(p.query) or _hash_route(p):
         return None
     hosts = {_site_host(url)}
-    # The listed address decides which section of the site counts. Where its
-    # homepage redirected, on a trusted move (landed_url), decides only the
-    # host the sitemap is looked for on. Where robots.txt redirects is not
-    # trusted: a parked or hijacked robots.txt can land anywhere.
+    # The listed address decides which section of the site counts, unless its
+    # homepage moved to another host on a trusted move (landed_url): then the
+    # site is the new one, and the section is where it landed. Where robots.txt
+    # redirects is not trusted: a parked or hijacked robots.txt can land anywhere.
     prefix = _path_prefix(url)
     landed = landed_url(url)
     if landed != url:
         hosts.add(_site_host(landed))
         p = urlparse(landed)
+        if _site_host(landed) != _site_host(url):
+            prefix = _path_prefix(landed)
     root = "%s://%s" % (p.scheme or "https", p.netloc)
     deadline = min(time.monotonic() + SITEMAP_DEADLINE_S,
                    deadline if deadline is not None else float("inf"))
@@ -2301,10 +2341,14 @@ def sitemap_date(url, now, deadline=None):
         if final in visited:
             continue
         visited.update((top, final))
-        # Where the site's own address redirected is the site too, on the same
-        # terms as a homepage's move. A sitemap robots.txt names on some other
-        # host does not make that host this site.
-        if _site_host(top) in hosts and trusted_move(url, final):
+        # Where the site's own sitemap address redirected is the site too, when
+        # it stays within the same registered domain. The project's homepage
+        # title cannot vouch for it: that page says nothing about the domain
+        # the sitemap went to. A sitemap robots.txt names on some other host
+        # does not make that host this site.
+        if (_site_host(top) in hosts
+                and _registrable(_site_host(final)) == _registrable(_site_host(top))
+                and not _looks_parked(url, final)):
             hosts.add(_site_host(final))
         # Every entry under one top sitemap is judged together, so a generator
         # pass split across many small child files is still one pass.
@@ -2517,7 +2561,7 @@ def _real_capture(row):
 
 WAYBACK_TEXT_MIN_WORDS      = 10  # distinct words that must differ to call it a change
 WAYBACK_TEXT_MIN_PAGE_WORDS = 30  # a capture with fewer is a stub, not the page
-WAYBACK_TEXT_FETCHES        = 8   # archived pages read per listing, at most
+WAYBACK_TEXT_FETCHES        = 4   # archived pages read per listing, at most
 
 
 def _archived_words(ts, target):
@@ -2552,70 +2596,65 @@ def _archive_time_left(deadline):
 
 def wayback_text_change(rows, target, now, deadline=None):
     """
-    The first capture of the page's current text, read from the archived pages
-    themselves, or None when the text did not change within the last year.
+    When the page's text last changed within the year, read from the archived
+    pages themselves, or None.
 
-    Only captures within WAYBACK_RECENT_CHANGE_DAYS are read: the newest, then
-    earlier ones at growing steps back to the oldest, until one reads
-    differently, then halving the gap. WAYBACK_TEXT_FETCHES caps the reads.
+    At most WAYBACK_TEXT_FETCHES (four) archived pages are read, at four
+    seconds apart: the newest capture, the one nearest six months back, the
+    one nearest a year back if the six-month one still reads the same, and
+    one partner beside the capture that differs, to check that the earlier
+    text held. A carousel or feed that rewrites part of the page on every
+    capture changes all the time and dates nothing.
 
-    A change counts only when the earlier text was stable: the capture before
-    the differing one, also within the year, reads the same as it. A carousel
-    or a feed that rewrites part of the page on every capture changes all the
-    time and dates nothing.
+    The date returned is the first capture after the last one read with the
+    earlier text. No read pins the change closer than that, so the date is the
+    earliest the current text can have appeared, and the change can be later.
     """
     recent = [r for r in rows if _cdx_time(r[0]) is not None
               and (now - _cdx_time(r[0])).days <= WAYBACK_RECENT_CHANGE_DAYS]
-    if len(recent) < 2:
+    if len(recent) < 3:
         return None
-    budget = [WAYBACK_TEXT_FETCHES]
+    reads = [0]
 
     def read(i):
-        if budget[0] <= 0 or not _archive_time_left(deadline):
+        if reads[0] >= WAYBACK_TEXT_FETCHES or not _archive_time_left(deadline):
             return None
-        budget[0] -= 1
+        reads[0] += 1
         return _archived_words(recent[i][0], target)
 
-    current = read(len(recent) - 1)
+    def nearest(days):
+        """Index of the capture nearest `days` ago, never the newest."""
+        return min(range(len(recent) - 1),
+                   key=lambda k: abs((now - _cdx_time(recent[k][0])).days - days))
+
+    newest = len(recent) - 1
+    current = read(newest)
     if current is None:
         return None
-    same, diff, diff_words = len(recent) - 1, None, None
-    step = 1
-    # One read is held back for the stability check.
-    while budget[0] > 1 and same > 0:
-        idx = max(same - step, 0)
-        words = read(idx)
-        step *= 2
+    diff = None
+    for days in (182, WAYBACK_RECENT_CHANGE_DAYS):
+        k = nearest(days)
+        words = read(k)
         if words is None:
-            if idx == 0:
-                break
-            continue
+            return None
         if _text_differs(words, current):
-            diff, diff_words = idx, words
+            diff, diff_words = k, words
             break
-        same = idx
     if diff is None:
         return None
-    # The earlier text has to have held for at least two captures.
-    partner = diff - 1 if diff > 0 else (diff + 1 if diff + 1 < same else None)
+    # The earlier text has to have held for two captures: the one before the
+    # differing capture, or, at the start of the year, the one after it.
+    partner = diff - 1 if diff > 0 else (diff + 1 if diff + 1 < newest else None)
     if partner is None:
         return None
     partner_words = read(partner)
     if partner_words is None or _text_differs(partner_words, diff_words):
         _log("    wayback  → the page's text changes on every capture; not dated")
         return None
-    if partner > diff:
-        diff = partner
-    while same - diff > 1:
-        mid = (same + diff) // 2
-        words = read(mid)
-        if words is None:
-            break
-        if _text_differs(words, current):
-            diff = mid
-        else:
-            same = mid
-    return _cdx_time(recent[same][0])
+    last_old = max(diff, partner)
+    if last_old + 1 > newest:
+        return None
+    return _cdx_time(recent[last_old + 1][0])
 
 
 def wayback_change_date(url, now=None, deadline=None):
@@ -2656,9 +2695,11 @@ def wayback_change_date(url, now=None, deadline=None):
     # The text is compared only on a homepage. A deep page on an institution's
     # site carries the institution's news box, so its text changes with the
     # host's news, not with the listing. Deep pages keep to the hashes.
-    # The listed address decides, not where it redirects.
-    listed = urlparse(url)
-    homepage = _path_prefix(url) == "" and not _identifying_query(listed.query)
+    # Both the listed address and the page actually read have to be a homepage:
+    # a homepage that redirects into a deep page reads that page's news box.
+    def is_home(u):
+        return _path_prefix(u) == "" and not _identifying_query(urlparse(u).query)
+    homepage = is_home(url) and is_home(landed_url(url))
     if reason == "noise" and homepage:
         dt = wayback_text_change(rows, target, now, deadline)
         if dt is None:
@@ -3378,7 +3419,7 @@ def score_project(project, budget_s=None):
             and not is_archive_host(raw_url) and not is_archive_host(website_url)):
         found = None
         if website_alive is True and site_verdict == "ok":
-            found = sitemap_date(website_url, now, **({"deadline": deadline} if deadline else {}))
+            found = sitemap_date(website_url, now, deadline=deadline)
             if found:
                 if found.build:
                     candidates.append((wayback_recency_score(found[0], now), found[0],
@@ -3397,8 +3438,7 @@ def score_project(project, budget_s=None):
         # higher of the two wins as the strongest signal.
         sitemap_old = found and (now - found[0]).days > WAYBACK_RECENT_CHANGE_DAYS
         if (not found or sitemap_old) and not fresh_copyright and not js_shell:
-            changed = wayback_change_date(website_url, now,
-                                          **({"deadline": deadline} if deadline else {}))
+            changed = wayback_change_date(website_url, now, deadline=deadline)
             if changed:
                 candidates.append((wayback_recency_score(changed, now), changed,
                                    WAYBACK_LABEL, WAYBACK))

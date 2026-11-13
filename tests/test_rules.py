@@ -335,18 +335,18 @@ def test_a_sitemap_with_nothing_usable_does_not_end_the_search(monkeypatch):
 
 
 def test_a_site_that_redirects_is_dated_by_the_host_it_lands_on(monkeypatch):
+    # A sitemap address that redirects within the same registered domain is
+    # the site; another domain is not, whatever the homepage's title says.
     from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {})
     _fake_web(monkeypatch, core, {
         "http://oldname.org/sitemap.xml": (
-            '<urlset><url><loc>https://www.newname.org/about</loc><lastmod>2026-03-01</lastmod></url>'
+            '<urlset><url><loc>https://www.oldname.org/about</loc><lastmod>2026-03-01</lastmod></url>'
             '<url><loc>/team</loc><lastmod>2026-05-01</lastmod></url></urlset>',
-            "https://www.newname.org/sitemap.xml")})
-    # A move to another domain is trusted only on the project's name.
-    monkeypatch.setattr(core, "_PROJECT_NAME", "Newname")
-    monkeypatch.setattr(core, "_PAGE_CACHE", {"http://oldname.org/": ("<title>Newname</title>", {})})
-    monkeypatch.setattr(core, "_PAGE_FINAL", {})
+            "https://www.oldname.org/sitemap.xml")})
     dt, src, _ = core.sitemap_date("http://oldname.org/", _now())
-    assert (dt.year, dt.month) == (2026, 5) and src == "https://www.newname.org/sitemap.xml"
+    assert (dt.year, dt.month) == (2026, 5) and src == "https://www.oldname.org/sitemap.xml"
 
 
 def test_a_truncated_gzip_sitemap_is_still_read(monkeypatch):
@@ -566,7 +566,7 @@ def test_an_undated_site_with_a_sitemap_date_is_scored(monkeypatch):
     from liveliness import core
     _undated_live_site(monkeypatch, core)
     when = datetime.now(timezone.utc) - timedelta(days=40)
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: core.SitemapFind(when, "https://x.org/sitemap.xml"))
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: core.SitemapFind(when, "https://x.org/sitemap.xml"))
     def no_archive(u, now=None):
         raise AssertionError("the archive is not asked once the sitemap answered")
     monkeypatch.setattr(core, "wayback_change_date", no_archive)
@@ -582,9 +582,9 @@ def test_an_archive_change_alone_never_reaches_active(monkeypatch):
     monkeypatch.setattr(core, "discover_social_links", lambda u: ["https://bsky.app/profile/x"])
     monkeypatch.setattr(core, "check_url_alive", lambda u: True)
     monkeypatch.setattr(core, "check_social_recency", lambda u: (None, "Bluesky"))
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
     monkeypatch.setattr(core, "wayback_change_date",
-                        lambda u, now=None: datetime.now(timezone.utc) - timedelta(days=10))
+                        lambda u, now=None, **k: datetime.now(timezone.utc) - timedelta(days=10))
     r = core.score_project(Project(name="x", website="https://x.org/"))
     # 45 for the change, 5 because the site's own dates are not recent, 10 social.
     assert r["score"] == 60 and r["activity_status"] == "Likely Active"
@@ -597,9 +597,9 @@ def test_a_bot_walled_site_can_be_dated_by_the_archive(monkeypatch):
     _undated_live_site(monkeypatch, core)
     monkeypatch.setattr(core, "probe_site", lambda u: (None, False, "blocked"))
     monkeypatch.setattr(core, "render_page_text", lambda u: None)
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
     monkeypatch.setattr(core, "wayback_change_date",
-                        lambda u, now=None: datetime.now(timezone.utc) - timedelta(days=100))
+                        lambda u, now=None, **k: datetime.now(timezone.utc) - timedelta(days=100))
     r = core.score_project(Project(name="x", website="https://x.org/"))
     assert r["score"] == 45 and r["activity_status"] == "Likely Active"
     assert r["status"] is None
@@ -612,12 +612,12 @@ def test_a_bot_walled_site_is_not_asked_for_its_sitemap(monkeypatch):
     _undated_live_site(monkeypatch, core)
     monkeypatch.setattr(core, "probe_site", lambda u: (None, False, "blocked"))
     monkeypatch.setattr(core, "render_page_text", lambda u: None)
-    def never(*a):
+    def never(*a, **k):
         raise AssertionError("not asked behind a wall")
     monkeypatch.setattr(core, "sitemap_date", never)
     asked = []
     monkeypatch.setattr(core, "wayback_change_date",
-                        lambda u, now=None: asked.append(u) or None)
+                        lambda u, now=None, **k: asked.append(u) or None)
     core.score_project(Project(name="x", website="https://x.org/"))
     assert asked == ["https://x.org/"]
 
@@ -626,7 +626,7 @@ def test_a_site_that_did_not_answer_is_not_dated_by_the_last_resorts(monkeypatch
     from liveliness import core
     _undated_live_site(monkeypatch, core)
     monkeypatch.setattr(core, "probe_site", lambda u: (None, False, "unknown"))
-    def never(*a):
+    def never(*a, **k):
         raise AssertionError("a site that timed out is not looked up")
     monkeypatch.setattr(core, "sitemap_date", never)
     monkeypatch.setattr(core, "wayback_change_date", never)
@@ -637,9 +637,9 @@ def test_an_archive_capture_is_not_written_as_the_projects_last_activity(monkeyp
     from datetime import datetime, timedelta, timezone
     from liveliness import core
     _undated_live_site(monkeypatch, core)
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
     monkeypatch.setattr(core, "wayback_change_date",
-                        lambda u, now=None: datetime.now(timezone.utc) - timedelta(days=10))
+                        lambda u, now=None, **k: datetime.now(timezone.utc) - timedelta(days=10))
     r = core.score_project(Project(name="x", website="https://x.org/"))
     assert r["score"] == 50
     assert r["last_activity_date"] is None
@@ -652,7 +652,7 @@ def test_a_walled_site_scored_from_the_archive_says_so(monkeypatch):
     monkeypatch.setattr(core, "probe_site", lambda u: (None, False, "blocked"))
     monkeypatch.setattr(core, "render_page_text", lambda u: None)
     monkeypatch.setattr(core, "wayback_change_date",
-                        lambda u, now=None: datetime.now(timezone.utc) - timedelta(days=100))
+                        lambda u, now=None, **k: datetime.now(timezone.utc) - timedelta(days=100))
     r = core.score_project(Project(name="x", website="https://x.org/"))
     assert "not evidence either way" not in r["breakdown"]
     assert "rests on the Wayback Machine" in r["breakdown"]
@@ -666,7 +666,7 @@ def test_a_fresh_footer_copyright_makes_the_archive_moot(monkeypatch):
     page = ("<html><body>" + "<p>We help cities listen to residents.</p>" * 20 +
             "<footer>&copy; %d Example</footer></body></html>" % year)
     monkeypatch.setattr(core, "get_page_cached", lambda u: (page, {}))
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
     def never(*a, **k):
         raise AssertionError("the archive cannot add to the copyright floor")
     monkeypatch.setattr(core, "wayback_change_date", never)
@@ -678,7 +678,7 @@ def test_a_dead_site_is_not_dated_by_the_archive(monkeypatch):
     _undated_live_site(monkeypatch, core)
     monkeypatch.setattr(core, "probe_site", lambda u: (False, False, "gone"))
     monkeypatch.setattr(core, "check_website", lambda u: (False, False, None))
-    def never(*a):
+    def never(*a, **k):
         raise AssertionError("a gone site is not looked up")
     monkeypatch.setattr(core, "sitemap_date", never)
     monkeypatch.setattr(core, "wayback_change_date", never)
@@ -692,7 +692,7 @@ def test_a_site_that_dates_itself_is_not_sent_to_the_sitemap(monkeypatch):
     page = ('<html><head><meta property="article:modified_time" content="2026-06-01"></head>'
             '<body>' + "<p>words</p>" * 60 + '</body></html>')
     monkeypatch.setattr(core, "get_page_cached", lambda u: (page, {}))
-    def never(*a):
+    def never(*a, **k):
         raise AssertionError("not needed")
     monkeypatch.setattr(core, "sitemap_date", never)
     monkeypatch.setattr(core, "wayback_change_date", never)
@@ -735,8 +735,8 @@ def test_a_stale_social_post_does_not_keep_the_last_resorts_away(monkeypatch):
     old = datetime.now(timezone.utc) - timedelta(days=900)
     monkeypatch.setattr(core, "check_social_recency", lambda u: (old, "Bluesky"))
     asked = []
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: asked.append(u) or None)
-    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None: None)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: asked.append(u) or None)
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: None)
     core.score_project(Project(name="x", website="https://x.org/"))
     assert asked == ["https://x.org/"]
 
@@ -750,7 +750,7 @@ def test_a_page_built_in_the_browser_is_not_dated_by_the_archive(monkeypatch):
                         lambda u: ('<html><body><div id="root"></div>'
                                    '<script src="/app.3f9c.js"></script></body></html>', {}))
     monkeypatch.setattr(core, "render_page_text", lambda u: None)
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
     def never(*a, **k):
         raise AssertionError("a script shell is not dated by the archive")
     monkeypatch.setattr(core, "wayback_change_date", never)
@@ -763,7 +763,7 @@ def test_a_shell_rendered_into_words_is_not_dated_by_the_archive_either(monkeypa
     monkeypatch.setattr(core, "get_page_cached",
                         lambda u: ('<html><body><div id="root"></div></body></html>', {}))
     monkeypatch.setattr(core, "render_page_text", lambda u: "We help cities listen. " * 30)
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
     def never(*a, **k):
         raise AssertionError("a script shell is not dated by the archive")
     monkeypatch.setattr(core, "wayback_change_date", never)
@@ -853,7 +853,7 @@ def test_a_sitemap_date_alone_does_not_set_status_active(monkeypatch):
     from liveliness import core
     _undated_live_site(monkeypatch, core)
     when = datetime.now(timezone.utc) - timedelta(days=60)
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: core.SitemapFind(when, "https://x.org/sitemap.xml"))
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: core.SitemapFind(when, "https://x.org/sitemap.xml"))
     r = core.score_project(Project(name="x", website="https://x.org/"))
     assert r["score"] == 85 and r["activity_status"] == "Active"
     assert r["status"] is None
@@ -868,7 +868,7 @@ def test_an_article_whose_homepage_is_walled_says_it_rests_on_the_archive(monkey
     monkeypatch.setattr(core, "probe_site", lambda u: (None, False, "blocked"))
     monkeypatch.setattr(core, "render_page_text", lambda u: None)
     monkeypatch.setattr(core, "wayback_change_date",
-                        lambda u, now=None: datetime.now(timezone.utc) - timedelta(days=100))
+                        lambda u, now=None, **k: datetime.now(timezone.utc) - timedelta(days=100))
     r = core.score_project(Project(name="x", website="https://news.example/story"))
     assert "no homepage could be found" not in r["breakdown"]
     assert "rests on the Wayback Machine" in r["breakdown"]
@@ -934,13 +934,13 @@ def test_a_page_dated_only_by_a_last_resort_is_still_read(monkeypatch):
     _undated_live_site(monkeypatch, core)
     monkeypatch.setattr(core, "ADJUDICATE", True)
     when = datetime.now(timezone.utc) - timedelta(days=40)
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: core.SitemapFind(when, "https://x.org/sitemap.xml"))
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: core.SitemapFind(when, "https://x.org/sitemap.xml"))
     assert core.score_project(Project(name="x", website="https://x.org/"))["adjudication"] is not None
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
-    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None: when)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: when)
     assert core.score_project(Project(name="x", website="https://x.org/"))["adjudication"] is not None
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
-    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None: None)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: None)
     assert core.score_project(Project(name="x", website="https://x.org/"))["adjudication"] is not None
 
 
@@ -1040,8 +1040,8 @@ def test_an_archived_repo_does_not_stop_an_undated_page_being_read(monkeypatch):
     when = _now() - timedelta(days=30)
     monkeypatch.setattr(core, "check_github", lambda u: {
         "best_date": when, "archived": True, "dates": {"push": when}, "resolution": None})
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
-    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None: None)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: None)
     r = core.score_project(Project(name="x", website="https://x.org/",
                                    repo="https://github.com/x/x"))
     assert r["adjudication"] is not None
@@ -1063,9 +1063,9 @@ def test_an_archive_only_score_does_not_say_nothing_recent_was_found(monkeypatch
     from datetime import datetime, timedelta, timezone
     from liveliness import core
     _undated_live_site(monkeypatch, core)
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now: None)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
     monkeypatch.setattr(core, "wayback_change_date",
-                        lambda u, now=None: datetime.now(timezone.utc) - timedelta(days=10))
+                        lambda u, now=None, **k: datetime.now(timezone.utc) - timedelta(days=10))
     r = core.score_project(Project(name="x", website="https://x.org/"))
     assert "nothing dated and recent" not in r["breakdown"]
     assert "Wayback Machine" in r["breakdown"].split("Website is responding", 1)[1].splitlines()[0]
@@ -1111,7 +1111,9 @@ def test_a_churning_hash_falls_back_to_comparing_the_text(monkeypatch):
     monkeypatch.setattr(core, "_archived_words",
                         lambda ts, target: new if ts >= rows[8][0] else old)
     dt = core.wayback_change_date("https://x.org/", now)
-    assert dt is not None and dt.strftime("%Y%m%d%H%M%S") == rows[8][0]
+    # Four reads bound the change: the date is the first capture after the
+    # last one read with the old text, never later than the real change.
+    assert dt is not None and dt.strftime("%Y%m%d%H%M%S") <= rows[8][0]
 
 
 def test_a_churning_hash_with_unchanged_text_dates_nothing(monkeypatch):
@@ -1165,7 +1167,7 @@ def test_a_publish_scores_like_an_archive_change(monkeypatch):
     _undated_live_site(monkeypatch, core)
     when = datetime.now(timezone.utc) - timedelta(days=3)
     monkeypatch.setattr(core, "sitemap_date",
-                        lambda u, now: core.SitemapFind(when, "https://x.org/sitemap.xml", build=True))
+                        lambda u, now, **k: core.SitemapFind(when, "https://x.org/sitemap.xml", build=True))
     r = core.score_project(Project(name="x", website="https://x.org/"))
     assert r["score"] == 50 and r["status"] is None and r["last_activity_date"] is None
     assert core.SITEMAP_BUILD_LABEL in r["breakdown"]
@@ -1316,7 +1318,7 @@ def test_the_listed_address_decides_whether_it_is_a_homepage(monkeypatch):
     from liveliness import core
     now = _now()
     monkeypatch.setattr(core, "_PAGE_CACHE", {})
-    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://www.x.org/home"})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://www.x.org/"})
     rows = _churny_rows(now)
     monkeypatch.setattr(core, "_cdx", lambda params: rows)
     old = {"word%d" % i for i in range(40)}
@@ -1475,3 +1477,92 @@ def test_build_passes_are_judged_on_the_whole_site_not_the_section():
     builds = []
     assert core.sitemap_newest_entry(entries, _now(), "/home", None, builds) is None
     assert builds and builds[0][0].date().isoformat() == "2026-11-08"
+
+
+# ── Review of df34a06 ─────────────────────────────────────────────────────────
+
+def test_a_projects_own_title_does_not_vouch_for_another_domains_sitemap(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PROJECT_NAME", "Civic Widget")
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Civic Widget</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {})
+    theirs = '<urlset><url><loc>https://other.com/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
+    _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": (theirs, "https://other.com/sitemap.xml")})
+    assert core.sitemap_date("https://x.org/", _now()) is None
+
+
+def test_a_parked_or_for_sale_landing_is_never_trusted(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PROJECT_NAME", "Civic Widget")
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://civicwidget.org/": (
+        "<title>civicwidget.org is for sale | Civic Widget</title><p>Buy this domain</p>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://civicwidget.org/": "https://www.civicwidget.org/lander"})
+    assert core.landed_url("https://civicwidget.org/") == "https://civicwidget.org/"
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://civicwidget.org/": ("<title>Civic Widget</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://civicwidget.org/": "https://sedo.com/search/details/?domain=civicwidget.org"})
+    assert core.landed_url("https://civicwidget.org/") == "https://civicwidget.org/"
+
+
+def test_a_name_match_always_needs_a_distinctive_word(monkeypatch):
+    from liveliness import core
+    # The whole name matching is not enough without a word of four letters.
+    monkeypatch.setattr(core, "_PROJECT_NAME", "Vox AI")
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Vox AI</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://other.com/"})
+    assert core.landed_url("https://x.org/") == "https://x.org/"
+
+
+def test_shared_hosting_tenants_are_separate_sites():
+    from liveliness import core
+    assert core._registrable("alice.github.io") != core._registrable("bob.github.io")
+    assert core._registrable("www.alice.github.io") == core._registrable("alice.github.io")
+    assert core._registrable("x.netlify.app") == "x.netlify.app"
+    assert core._registrable("news.x.org") == "x.org"
+
+
+def test_the_text_is_compared_only_when_the_landed_page_is_a_homepage_too(monkeypatch):
+    from liveliness import core
+    now = _now()
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://www.x.org/about/history"})
+    monkeypatch.setattr(core, "_cdx", lambda params: _churny_rows(now))
+    def never(ts, target):
+        raise AssertionError("the landed page is not a homepage")
+    monkeypatch.setattr(core, "_archived_words", never)
+    assert core.wayback_change_date("https://x.org/", now) is None
+
+
+def test_a_move_to_another_host_takes_its_section_from_where_it_landed(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PROJECT_NAME", "Civic Widget")
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/widget/": ("<title>Civic Widget</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/widget/": "https://civicwidget.io/"})
+    body = '<urlset><url><loc>https://civicwidget.io/news/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
+    _fake_web(monkeypatch, core, {"https://civicwidget.io/sitemap.xml": body})
+    dt, _, _ = core.sitemap_date("https://x.org/widget/", _now())
+    assert (dt.month, dt.day) == (9, 1)
+
+
+def test_the_text_fallback_reads_at_most_four_archived_pages(monkeypatch):
+    from liveliness import core
+    now = _now()
+    rows = _churny_rows(now, n=18)
+    monkeypatch.setattr(core, "_cdx", lambda params: rows)
+    reads = []
+    old = {"word%d" % i for i in range(40)}
+    new = {"term%d" % i for i in range(40)}
+    def words(ts, target):
+        reads.append(ts)
+        return new if ts >= rows[14][0] else old
+    monkeypatch.setattr(core, "_archived_words", words)
+    dt = core.wayback_change_date("https://x.org/", now)
+    assert dt is not None and len(reads) <= 4
+
+
+def test_score_project_always_passes_a_deadline(monkeypatch):
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    got = []
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, deadline: got.append(deadline))
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now, deadline: got.append(deadline))
+    core.score_project(Project(name="x", website="https://x.org/"))
+    assert got == [None, None]
