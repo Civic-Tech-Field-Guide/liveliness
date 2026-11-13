@@ -2157,16 +2157,16 @@ def test_a_deep_page_on_the_apex_sent_to_a_subdomain_root_was_removed(monkeypatc
     assert core.landed_url("https://x.org/projects/foo") == "https://x.org/projects/foo"
 
 
-def test_a_sitemap_sent_to_a_sibling_subdomain_needs_the_name(monkeypatch):
+def test_a_sitemap_sent_to_a_sibling_subdomain_is_not_trusted(monkeypatch):
     from liveliness import core
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://blog.x.org/": ("<title>Something else</title>", {})})
     monkeypatch.setattr(core, "_PAGE_FINAL", {})
     body = '<urlset><url><loc>https://news.x.org/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
     _fake_web(monkeypatch, core, {"https://blog.x.org/sitemap.xml": (body, "https://news.x.org/sitemap.xml")})
     assert core.sitemap_date("https://blog.x.org/", _now(), name="Civic Widget") is None
+    # Not even with the name on the homepage: it says nothing about the sibling's list.
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://blog.x.org/": ("<title>Civic Widget blog</title>", {})})
-    found = core.sitemap_date("https://blog.x.org/", _now(), name="Civic Widget")
-    assert found is not None and found.date.month == 9
+    assert core.sitemap_date("https://blog.x.org/", _now(), name="Civic Widget") is None
 
 
 def test_busy_lookup_workers_answer_unknown_at_once(monkeypatch):
@@ -2319,3 +2319,77 @@ def test_og_names_are_read_in_either_order_and_with_apostrophes(monkeypatch):
 def test_sitemap_moves_use_trusted_move():
     from liveliness import core
     assert not hasattr(core, "_sitemap_move_trusted")
+
+
+# ── Review of 6c3e057 ─────────────────────────────────────────────────────────
+
+def test_a_sitemap_sent_to_a_sibling_is_never_trusted_on_a_name(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://civiclab.uni.edu/": ("<title>Civic Lab</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {})
+    body = '<urlset><url><loc>https://news.uni.edu/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
+    _fake_web(monkeypatch, core, {"https://civiclab.uni.edu/sitemap.xml": (body, "https://news.uni.edu/sitemap.xml")})
+    assert core.sitemap_date("https://civiclab.uni.edu/", _now(), name="Civic Lab") is None
+
+
+def test_a_listed_homepage_that_reads_as_parked_skips_the_last_resorts(monkeypatch):
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    monkeypatch.setattr(core, "get_page_cached", lambda u: ("<p>This domain is for sale. Make an offer.</p>", {}))
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<p>This domain is for sale. Make an offer.</p>", {})})
+    def never(*a, **k):
+        raise AssertionError("a parked homepage is not dated")
+    monkeypatch.setattr(core, "sitemap_date", never)
+    monkeypatch.setattr(core, "wayback_change_date", never)
+    core.score_project(Project(name="x", website="https://x.org/"))
+
+
+def test_the_section_comes_from_the_listing_or_where_a_deep_page_landed(monkeypatch):
+    from liveliness import core
+    cases = [
+        # (listed, landed, title, entries, expected month)
+        ("https://lab.old.edu/x", "https://new.edu/labs/x", "Civic Widget",
+         [("https://new.edu/labs/x/a", "2026-09-01"), ("https://new.edu/other", "2026-10-01")], 9),
+        ("https://x.org/tools/foo", "https://x.org/projects/foo", "X",
+         [("https://x.org/projects/foo/a", "2026-08-01"), ("https://x.org/other", "2026-10-01")], 8),
+        ("https://oldname.org/", "https://newname.org/home", "Civic Widget",
+         [("https://newname.org/news/a", "2026-07-01")], 7),
+    ]
+    for listed, landed, title, entries, month in cases:
+        monkeypatch.setattr(core, "_PAGE_CACHE", {listed: ("<title>%s</title>" % title, {})})
+        monkeypatch.setattr(core, "_PAGE_FINAL", {listed: landed})
+        root = "https://" + core.urlparse(landed).netloc
+        body = "<urlset>" + "".join("<url><loc>%s</loc><lastmod>%s</lastmod></url>" % e for e in entries) + "</urlset>"
+        _fake_web(monkeypatch, core, {root + "/sitemap.xml": body})
+        found = core.sitemap_date(listed, _now(), name="Civic Widget")
+        assert found is not None and found.date.month == month, listed
+
+
+def test_the_archive_query_filters_to_real_html_captures(monkeypatch):
+    from liveliness import core
+    asked = []
+    monkeypatch.setattr(core, "_cdx", lambda params, **k: asked.append(params) or None)
+    core.wayback_change_date("https://x.org/", _now())
+    filters = asked[0]["filter"]
+    assert "statuscode:(200|-)" in filters
+    assert any(f.startswith("mimetype:") and "text/html" in f for f in filters)
+
+
+def test_a_lookup_thread_that_will_not_start_gives_its_slot_back(monkeypatch):
+    from liveliness import core
+    def boom(self):
+        raise RuntimeError("can't start new thread")
+    monkeypatch.setattr(core.threading.Thread, "start", boom)
+    for _ in range(core.LOOKUP_WORKERS + 1):
+        assert core.host_resolves("https://x.example/", timeout=0.1) is None
+    assert core._LOOKUP_SLOTS.acquire(blocking=False)
+    core._LOOKUP_SLOTS.release()
+
+
+def test_get_within_fits_one_request_to_the_time_left(monkeypatch):
+    import time
+    from liveliness import core
+    got = {}
+    monkeypatch.setattr(core, "get_limited", lambda url, **k: got.update(k) or _FakeResponse(url, "ok"))
+    core.get_within("https://x.org/", time.monotonic() + 8, 10)
+    assert got["timeout"] <= 2.1 and got["deadline_s"] <= 2.1
