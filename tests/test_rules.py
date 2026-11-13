@@ -1991,7 +1991,7 @@ def test_no_lookup_for_a_host_the_homepage_already_reached(monkeypatch):
     assert core.sitemap_date("https://x.org/", _now()) is None
 
 
-def test_hung_lookups_share_one_thread(monkeypatch):
+def test_hung_lookups_hold_at_most_the_pool(monkeypatch):
     import threading
     import time
     from liveliness import core
@@ -2000,7 +2000,7 @@ def test_hung_lookups_share_one_thread(monkeypatch):
     before = threading.active_count()
     for i in range(4):
         core.host_resolves("https://slow%d.example/" % i, timeout=0.1)
-    assert threading.active_count() - before <= 1
+    assert threading.active_count() - before <= core.LOOKUP_WORKERS
 
 
 def test_request_caps_is_one_number():
@@ -2122,3 +2122,99 @@ def test_a_move_down_from_the_apex_into_a_subdomain_is_trusted(monkeypatch):
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://blog.x.org/": ("<title>XP Portal</title>", {})})
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://blog.x.org/": "https://portal.x.org/"})
     assert core.landed_url("https://blog.x.org/") == "https://blog.x.org/"
+
+
+# ── Review of a023bfb ─────────────────────────────────────────────────────────
+
+def test_a_sitemap_win_over_an_old_commit_does_not_set_status_active(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(days=730)
+    monkeypatch.setattr(core, "check_github", lambda u: {
+        "best_date": old, "archived": False, "dates": {"push": old}, "resolution": None})
+    monkeypatch.setattr(core, "sitemap_date",
+                        lambda u, now, **k: core.SitemapFind(now - timedelta(days=60), "s.xml"))
+    r = core.score_project(Project(name="x", website="https://x.org/", repo="https://github.com/x/x"))
+    assert r["activity_status"] == "Active" and r["status"] is None
+
+
+def test_candidates_say_whether_they_are_the_projects_own_evidence():
+    from liveliness import core
+    c = core.Candidate(70, _now(), "Blog post", core.OWN)
+    assert c.own and not core.Candidate(45, _now(), core.WAYBACK_LABEL, core.WAYBACK).own
+
+
+def test_a_deep_page_on_the_apex_sent_to_a_subdomain_root_was_removed(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/projects/foo": ("<title>X</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/projects/foo": "https://portal.x.org/"})
+    assert core.landed_url("https://x.org/projects/foo") == "https://x.org/projects/foo"
+
+
+def test_a_sitemap_sent_to_a_sibling_subdomain_needs_the_name(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://blog.x.org/": ("<title>Something else</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {})
+    body = '<urlset><url><loc>https://news.x.org/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
+    _fake_web(monkeypatch, core, {"https://blog.x.org/sitemap.xml": (body, "https://news.x.org/sitemap.xml")})
+    assert core.sitemap_date("https://blog.x.org/", _now(), name="Civic Widget") is None
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://blog.x.org/": ("<title>Civic Widget blog</title>", {})})
+    found = core.sitemap_date("https://blog.x.org/", _now(), name="Civic Widget")
+    assert found is not None and found.date.month == 9
+
+
+def test_busy_lookup_workers_answer_unknown_at_once(monkeypatch):
+    import threading
+    import time
+    from liveliness import core
+    release = threading.Event()
+    monkeypatch.setattr(core.socket, "getaddrinfo", lambda *a, **k: release.wait(5))
+    try:
+        for i in range(core.LOOKUP_WORKERS):
+            core.host_resolves("https://hung%d.example/" % i, timeout=0.05)
+        start = time.monotonic()
+        assert core.host_resolves("https://next.example/", timeout=2) is None
+        assert time.monotonic() - start < 0.2
+    finally:
+        release.set()
+        time.sleep(0.1)
+
+
+def test_a_cdx_answer_that_is_not_a_list_is_no_answer(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_wayback_get",
+                        lambda url, params=None, deadline=None, *a: _FakeResponse(url, '{"error": "busy"}'))
+    assert core._cdx({"url": "x.org/"}) is None
+
+
+def test_an_unreadable_six_month_capture_falls_through_to_the_year(monkeypatch):
+    from liveliness import core
+    now = _now()
+    rows = _churny_rows(now, n=17)    # 357 days back to 21 days back
+    old = {"word%d" % i for i in range(40)}
+    new = {"term%d" % i for i in range(40)}
+    six = min(range(len(rows) - 2), key=lambda k: abs((now - core._cdx_time(rows[k][0])).days - 182))
+    def words(ts, target, **k):
+        i = [r[0] for r in rows].index(ts)
+        if i == six:
+            return None
+        return new if i >= 14 else old
+    monkeypatch.setattr(core, "_archived_words", words)
+    assert core.wayback_text_change(rows, "x.org/", now) is not None
+
+
+def test_request_caps_names_one_body_deadline():
+    from liveliness import core
+    assert core.body_deadline(40, core.request_caps(40, 10)) == 10
+    assert core.body_deadline(8, core.request_caps(8, 10)) == 2
+
+
+def test_social_links_are_deduplicated_by_site(monkeypatch):
+    from liveliness import core
+    page = ('<a href="https://TWITTER.com/x">t</a><a href="https://www.twitter.com:443/x">t2</a>'
+            '<a href="https://bsky.app/profile/x">b</a>')
+    monkeypatch.setattr(core, "get_page_cached", lambda u: (page, {}))
+    links = core.discover_social_links("https://x.org/")
+    assert len(links) == 2 and links[0] == "https://TWITTER.com/x"

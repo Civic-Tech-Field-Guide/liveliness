@@ -30,6 +30,7 @@ import os
 import re
 import concurrent.futures
 import socket
+import threading
 import time
 import zlib
 from collections import Counter
@@ -239,6 +240,24 @@ def _looks_parked(listed, new, html=None):
     return bool(_PARKED_TEXT.search(titles + " " + visible))
 
 
+def _sitemap_move_trusted(listed, top, final, name):
+    """
+    Whether a sitemap address that redirected from `top` to `final`, within
+    one registered domain, is still the listed site's sitemap: the same host,
+    www or not; a move from the front page of the apex into one of its own
+    subdomains; otherwise a sibling or deeper subdomain only when the listed
+    page names the project. Never a move up to a parent host.
+    """
+    th, fh = _site_host(top), _site_host(final)
+    if th == fh:
+        return True
+    if _moves_up(th, fh):
+        return False
+    if th == _registrable(th) and fh.endswith("." + th) and _path_prefix(listed) == "":
+        return True
+    return _page_names_project(listed, name)
+
+
 def _moves_up(listed_host, new_host):
     """True when new_host is an ancestor of listed_host: civiclab.uni.edu to uni.edu."""
     return listed_host != new_host and listed_host.endswith("." + new_host)
@@ -252,8 +271,9 @@ def trusted_move(listed, new, name=None):
     The same host, with or without www, is the same site. A move up to a
     parent host (civiclab.uni.edu to www.uni.edu) is never trusted: that is
     the parent's site, and it would date the project by the parent's news. A
-    move down from the apex or www host into one of its subdomains is the
-    organization redirecting into its own site, and is trusted. A move from
+    move from the front page of the apex or www host into one of its
+    subdomains is the organization redirecting into its own site, and is
+    trusted. A move from
     one subdomain to a sibling or deeper one, or to another domain, is trusted
     only when the page names the project. A parking or for-sale page is never
     trusted, whatever its domain.
@@ -267,7 +287,7 @@ def trusted_move(listed, new, name=None):
         return False
     # Down from the organization's own front door (the apex or www) into one
     # of its subdomains is the organization redirecting into its own site.
-    if lh == _registrable(lh) and nh.endswith("." + lh):
+    if lh == _registrable(lh) and nh.endswith("." + lh) and _path_prefix(listed) == "":
         return True
     return _page_names_project(listed, name)
 
@@ -283,33 +303,44 @@ def landed_url(url, name=None):
     if (not final or not final.lower().startswith(("http://", "https://"))
             or is_archive_host(final) or not trusted_move(url, final, name)):
         return url
-    # A page that now sends visitors to its site's front page was removed. The
-    # front page is the site's, not the listing's, so it dates nothing here.
-    if (_site_host(final) == _site_host(url) and _path_prefix(url) != ""
-            and _path_prefix(final) == ""):
+    # A page that now sends visitors to the front page of its own site, or of
+    # one of the organization's subdomains, was removed. That front page is
+    # the organization's, not the listing's, so it dates nothing here.
+    if (_registrable(_site_host(final)) == _registrable(_site_host(url))
+            and _path_prefix(url) != "" and _path_prefix(final) == ""):
         return url
     return final
 
 
-# One worker for the timed name lookups (host_resolves with a timeout), so
-# lookups that hang queue behind each other on one thread rather than piling
-# up a thread each.
-_LOOKUPS = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="lookup")
+# A small pool for the timed name lookups (host_resolves with a timeout), so
+# lookups that hang hold at most LOOKUP_WORKERS threads.
+LOOKUP_WORKERS = 4
+_LOOKUPS = concurrent.futures.ThreadPoolExecutor(max_workers=LOOKUP_WORKERS,
+                                                 thread_name_prefix="lookup")
+# A free worker, taken before a lookup is handed over and given back when it
+# ends. With every worker held by a hung lookup, the answer is "unknown" at
+# once rather than a place in a queue.
+_LOOKUP_SLOTS = threading.BoundedSemaphore(LOOKUP_WORKERS)
 
 
 def request_caps(remaining, cap):
     """
-    The timeout, and the body deadline, for one get_limited call that must finish within
-    `remaining` seconds. requests applies its timeout to the connection, to
-    the response headers and to each chunk, and the body loop checks its
-    deadline only between chunks, so the worst case is three timeouts plus
-    the body deadline. Each gets a quarter, and neither exceeds `cap`.
+    The timeout for one get_limited call that must finish within `remaining`
+    seconds: a quarter of it, at most `cap`. requests applies its timeout to
+    the connection, to the response headers and to each chunk, and the body
+    loop checks its deadline only between chunks, so the worst case is three
+    timeouts plus the body deadline, which body_deadline() gives.
 
     The stop is approximate: requests applies the timeout to each redirect hop
     afresh, so a request that follows redirects can run over by about one
     timeout per extra hop.
     """
     return min(cap, max(remaining, 0) / 4)
+
+
+def body_deadline(remaining, timeout):
+    """The body deadline that, with three timeouts, fits in `remaining`: at least half a second."""
+    return max(remaining - 3 * timeout, 0.5)
 
 
 def get_limited(url, timeout=10, headers=None, deadline_s=None, max_bytes=None):
@@ -692,8 +723,8 @@ def host_resolves(url, timeout=None):
     """
     False only when the hostname genuinely does not resolve.
 
-    With `timeout`, the lookup runs on the lookup worker and is given up
-    after that many seconds, since request timeouts do not cover it and a
+    With `timeout`, the lookup runs on the lookup pool and is given up
+    after that many seconds, or not started when every worker is busy, since request timeouts do not cover it and a
     lookup that hangs can take half a minute. Given up, or failing, the answer
     is None: unknown. The public-resolver check is skipped then, to keep to
     the time.
@@ -711,7 +742,15 @@ def host_resolves(url, timeout=None):
     if not host:
         return None
     if timeout is not None:
-        future = _LOOKUPS.submit(socket.getaddrinfo, host, None)
+        if not _LOOKUP_SLOTS.acquire(blocking=False):
+            return None
+
+        def look():
+            try:
+                return socket.getaddrinfo(host, None)
+            finally:
+                _LOOKUP_SLOTS.release()
+        future = _LOOKUPS.submit(look)
         try:
             future.result(timeout=max(timeout, 0))
             return True
@@ -1168,10 +1207,9 @@ def discover_social_links(website_url):
         for href, _ in parser.links:
             if not href.startswith("http"):
                 continue
-            netloc = _netloc(href)
-            if netloc is None:
+            if _netloc(href) is None:
                 continue
-            netloc = netloc.removeprefix("www.")
+            netloc = _site_host(href)
             if netloc in _SOCIAL_DOMAINS and netloc not in found:
                 found[netloc] = href
         return list(found.values())
@@ -2077,8 +2115,7 @@ def _sitemap_body(url, deadline):
     if remaining <= 1:
         return None
     timeout = request_caps(remaining, SITEMAP_TIMEOUT_S)
-    # Three timeouts in the worst case, and the rest for the body.
-    read_s = max(remaining - 3 * timeout, 0.5)
+    read_s = body_deadline(remaining, timeout)
     try:
         r = get_limited(url, timeout=timeout, deadline_s=read_s, max_bytes=SITEMAP_MAX_BYTES)
     except Exception:
@@ -2232,6 +2269,19 @@ def _same_site(loc, hosts):
 # Where a candidate date came from: the project's own evidence, or one of the
 # two last resorts.
 OWN, SITEMAP, WAYBACK = "own", "sitemap", "wayback"
+
+
+class Candidate(NamedTuple):
+    """One dated signal: its points, its date, how the breakdown names it, and where it came from."""
+    score: float
+    date: datetime
+    label: str
+    source: str
+
+    @property
+    def own(self):
+        """True for evidence the project left itself, not a sitemap's or the archive's."""
+        return self.source == OWN
 # A whole-site publish from the sitemap. Weighted and reported like WAYBACK.
 BUILD = "build"
 
@@ -2384,7 +2434,8 @@ def _robots_sitemaps(root, deadline):
     remaining = deadline - time.monotonic()
     if remaining <= 1:
         return []
-    timeout = read_s = request_caps(remaining, SITEMAP_TIMEOUT_S)
+    timeout = request_caps(remaining, SITEMAP_TIMEOUT_S)
+    read_s = body_deadline(remaining, timeout)
     try:
         r = get_limited(root + "/robots.txt", timeout=timeout, deadline_s=read_s)
     except Exception:
@@ -2478,7 +2529,7 @@ def sitemap_date(url, now, deadline=None, landed=None, name=None):
         # does not make that host this site.
         if (_site_host(top) in hosts
                 and _registrable(_site_host(final)) == _registrable(_site_host(top))
-                and not _moves_up(_site_host(top), _site_host(final))
+                and _sitemap_move_trusted(url, top, final, name)
                 and not _looks_parked(url, final, html=text)):
             hosts.add(_site_host(final))
         # Every entry under one top sitemap is judged together, so a generator
@@ -2608,7 +2659,9 @@ def _wayback_get(url, params=None, deadline=None, count_failure=True):
     if deadline is None:
         timeout, read_s = WAYBACK_TIMEOUT_S, WAYBACK_TIMEOUT_S
     else:
-        timeout = read_s = request_caps(deadline - time.monotonic(), WAYBACK_TIMEOUT_S)
+        remaining = deadline - time.monotonic()
+        timeout = request_caps(remaining, WAYBACK_TIMEOUT_S)
+        read_s = body_deadline(remaining, timeout)
     full_timeout = timeout >= WAYBACK_PAUSE_MIN_TIMEOUT_S
     if params:
         url = url + "?" + urlencode(params)
@@ -2654,6 +2707,8 @@ def _cdx(params, deadline=None, count_failure=True):
     try:
         rows = json.loads(r.text)
     except ValueError:
+        return None
+    if not isinstance(rows, list):
         return None
     return [row for row in rows[1:] if isinstance(row, list) and len(row) >= 2]
 
@@ -2827,7 +2882,8 @@ def wayback_text_change(rows, target, now, deadline=None):
         tried.add(k)
         words = read(k)
         if words is None:
-            return None
+            # An unreadable six-month capture leaves the year-old one to try.
+            continue
         if _text_differs(words, current):
             diff, diff_words = k, words
             break
@@ -3508,13 +3564,13 @@ def score_project(project, budget_s=None):
         if github_archived:
             s = min(s, 15)  # maintainers explicitly stopped work on the repo
         kind = next((k for k, v in gh["dates"].items() if v == github_date), None)
-        candidates.append((s, github_date, GH_SIGNAL_LABELS.get(kind, "GitHub activity"), OWN))
+        candidates.append(Candidate(s, github_date, GH_SIGNAL_LABELS.get(kind, "GitHub activity"), OWN))
 
     if blog_date:
-        candidates.append((recency_base_score(blog_date, now), blog_date, "Blog post", OWN))
+        candidates.append(Candidate(recency_base_score(blog_date, now), blog_date, "Blog post", OWN))
 
     for dt, platform in social_dated:
-        candidates.append((social_recency_score(dt, now), dt, f"{platform} post", OWN))
+        candidates.append(Candidate(social_recency_score(dt, now), dt, f"{platform} post", OWN))
 
     # What the project's own page says about itself. The page was already
     # downloaded for the social-link scrape, so this costs no extra request.
@@ -3580,11 +3636,11 @@ def score_project(project, budget_s=None):
             page_signals = page_date_signals(page_html, page_headers, now, text=rendered)
             if page_signals:
                 pdt, plabel = max(page_signals, key=lambda c: c[0])
-                candidates.append((page_recency_score(pdt, now), pdt, plabel, OWN))
+                candidates.append(Candidate(page_recency_score(pdt, now), pdt, plabel, OWN))
                 _log(f"    page     → {plabel}: {pdt:%Y-%m-%d}")
             news = latest_news_date(page_html, website_url, now) if page_html else None
             if news:
-                candidates.append((recency_base_score(news[0], now), news[0],
+                candidates.append(Candidate(recency_base_score(news[0], now), news[0],
                                    "Newest item on the site's own news page", OWN))
             page_closed, page_closed_phrase = page_says_closed(page_html, now, text=rendered)
             if page_closed:
@@ -3624,7 +3680,7 @@ def score_project(project, budget_s=None):
     # A stale social post scores 0 and is no reason to stop looking.
     # Asked when nothing the project left is recent: a three-year-old commit
     # scoring 35 is no reason not to look for something newer.
-    recent_own = any(c[3] == OWN and c[0] > 0 and (now - c[1]).days <= STALE_AFTER_DAYS
+    recent_own = any(c.own and c.score > 0 and (now - c.date).days <= STALE_AFTER_DAYS
                      for c in candidates)
     if (not recent_own and website_url and project_site
             and not page_closed and not is_archived and site_verdict in ("ok", "blocked")
@@ -3646,16 +3702,16 @@ def score_project(project, budget_s=None):
                                  name=name)
             if found:
                 if found.build:
-                    candidates.append((wayback_recency_score(found[0], now), found[0],
+                    candidates.append(Candidate(wayback_recency_score(found[0], now), found[0],
                                        SITEMAP_BUILD_LABEL, BUILD))
                     _log(f"    sitemap  → whole-site publish {found[0]:%Y-%m-%d} in {found[1][:70]}")
                     if found.page_date is not None:
                         # The publish scores; the older page date is still the
                         # newest the site gave a page, so it stays on record.
-                        candidates.append((page_recency_score(found.page_date, now),
+                        candidates.append(Candidate(page_recency_score(found.page_date, now),
                                            found.page_date, SITEMAP_LABEL, SITEMAP))
                 else:
-                    candidates.append((page_recency_score(found[0], now), found[0],
+                    candidates.append(Candidate(page_recency_score(found[0], now), found[0],
                                        SITEMAP_LABEL, SITEMAP))
                     _log(f"    sitemap  → newest change {found[0]:%Y-%m-%d} in {found[1][:70]}")
             else:
@@ -3670,7 +3726,7 @@ def score_project(project, budget_s=None):
             changed = wayback_change_date(website_url, now, deadline=lr_deadline, landed=landed,
                                           name=name)
             if changed:
-                candidates.append((wayback_recency_score(changed, now), changed,
+                candidates.append(Candidate(wayback_recency_score(changed, now), changed,
                                    WAYBACK_LABEL, WAYBACK))
                 _log(f"    wayback  → content last changed {changed:%Y-%m-%d}")
 
@@ -3680,7 +3736,13 @@ def score_project(project, budget_s=None):
     # did, so it counts toward the score and nothing else: it does not earn a
     # live site the bonus a recent dated signal does, and it is not reported as
     # the project's last activity.
-    bonus_date = max((c[1] for c in candidates if c[3] not in (WAYBACK, BUILD)), default=None)
+    last_date = max((c.date for c in candidates if c.source not in (WAYBACK, BUILD)), default=None)
+    # The website bonus, its wording and whether Status may say Active all
+    # follow the signal that set the score. A three-year-old commit beside a
+    # winning sitemap date does not make the sitemap's score the project's own.
+    winner = max(candidates, key=lambda c: (c.score, c.date)) if candidates else None
+    bonus_date = (winner.date if winner is not None and winner.source not in (WAYBACK, BUILD)
+                  else None)
 
     score = float(best_score)
 
@@ -3691,7 +3753,6 @@ def score_project(project, budget_s=None):
     why = []
 
     if candidates:
-        winner = max(candidates, key=lambda c: (c[0], c[1]))
         why.append(f"Strongest signal: {winner[2]}, {describe_age(winner[1], now)} ({winner[0]})")
         others = sorted((c for c in candidates if c is not winner),
                         key=lambda c: c[0], reverse=True)
@@ -3725,17 +3786,17 @@ def score_project(project, budget_s=None):
         bonus  = website_alive_bonus(bonus_date, now)
         before = score
         score  = min(score + bonus, 100)
-        why.append(_adjustment(
-            "Website is responding" if bonus == WEBSITE_ALIVE_BONUS
-            else "Website is responding; the only recent sign is the Wayback Machine's "
-                 "record of the page changing"
-            if any(c[3] == WAYBACK and c[0] > 0 for c in candidates)
-            else "Website is responding; the only recent sign is a publish of the whole "
-                 "site listed in its sitemap"
-            if any(c[3] == BUILD and c[0] > 0 for c in candidates)
-            else "Website is responding, but nothing dated and recent was found to go "
-                 "with it",
-            bonus, score - before))
+        if bonus == WEBSITE_ALIVE_BONUS:
+            label = "Website is responding"
+        elif winner is not None and winner.source == WAYBACK:
+            label = ("Website is responding; the strongest sign is the Wayback Machine's "
+                     "record of the page changing")
+        elif winner is not None and winner.source == BUILD:
+            label = ("Website is responding; the strongest sign is a publish of the whole "
+                     "site listed in its sitemap")
+        else:
+            label = "Website is responding, but nothing dated and recent was found to go with it"
+        why.append(_adjustment(label, bonus, score - before))
     elif site_verdict == "relink":
         # The page is gone and its host is not. That is a stale link, not a
         # dead project, and the two want opposite rulings, so it takes a much
@@ -3767,7 +3828,7 @@ def score_project(project, budget_s=None):
         # Said out loud because it is a fact about the wall, not about the
         # project, and a reader comparing two low scores should be able to tell
         # "we could not look" from "we looked and found nothing".
-        if any(c[3] == WAYBACK for c in candidates):
+        if winner is not None and winner.source == WAYBACK:
             why.append("The site is behind a bot check that refused both an ordinary "
                        "request and a browser, so the score rests on the Wayback "
                        "Machine's record of the page changing")
@@ -3870,8 +3931,7 @@ def score_project(project, budget_s=None):
     # The sitemap and the archive are the weakest dates there are. A score that
     # rests on them alone can read Active, but it is not the confidence the
     # Status field asks for, so Status is left alone.
-    if status == "Active" and all(c[3] in (SITEMAP, WAYBACK, BUILD)
-                                  for c in candidates if c[0] > 0):
+    if status == "Active" and winner is not None and not winner.own:
         status = None
 
     # A finished piece of work is N/A, and it outranks anything the signals say.
@@ -3989,7 +4049,7 @@ def score_project(project, budget_s=None):
         why.append(f"Total: {score:g} out of 100 - {activity_status}")
     breakdown = "\n".join(why)
 
-    last_activity_str = bonus_date.strftime("%Y-%m-%d") if bonus_date else None
+    last_activity_str = last_date.strftime("%Y-%m-%d") if last_date else None
     _log(f"    → score={'(cleared)' if score is None else score}  activity={activity_status}  "
           f"status={status or '(no change)'}  last_activity={last_activity_str}")
     if discovered_url:
