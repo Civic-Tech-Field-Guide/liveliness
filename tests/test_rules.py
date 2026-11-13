@@ -304,7 +304,7 @@ def test_a_sitemap_index_is_followed_to_its_children(monkeypatch):
     seen = _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": index,
                                          "https://x.org/post-sitemap.xml": posts,
                                          "https://x.org/page-sitemap.xml": pages})
-    dt, src = core.sitemap_date("https://x.org/", _now())
+    dt, src, _ = core.sitemap_date("https://x.org/", _now())
     assert (dt.month, dt.day) == (8, 31) and src.endswith("post-sitemap.xml")
     assert seen == ["https://x.org/robots.txt", "https://x.org/sitemap.xml",
                     "https://x.org/post-sitemap.xml", "https://x.org/page-sitemap.xml"]
@@ -330,7 +330,7 @@ def test_a_sitemap_with_nothing_usable_does_not_end_the_search(monkeypatch):
             '<urlset><url><loc>https://news.example/a</loc><lastmod>2026-11-01</lastmod></url></urlset>',
         "https://x.org/sitemap.xml":
             '<urlset><url><loc>https://x.org/</loc><lastmod>2025-08-01</lastmod></url></urlset>'})
-    dt, src = core.sitemap_date("https://x.org/", _now())
+    dt, src, _ = core.sitemap_date("https://x.org/", _now())
     assert (dt.year, dt.month) == (2025, 8) and src == "https://x.org/sitemap.xml"
 
 
@@ -341,7 +341,11 @@ def test_a_site_that_redirects_is_dated_by_the_host_it_lands_on(monkeypatch):
             '<urlset><url><loc>https://www.newname.org/about</loc><lastmod>2026-03-01</lastmod></url>'
             '<url><loc>/team</loc><lastmod>2026-05-01</lastmod></url></urlset>',
             "https://www.newname.org/sitemap.xml")})
-    dt, src = core.sitemap_date("http://oldname.org/", _now())
+    # A move to another domain is trusted only on the project's name.
+    monkeypatch.setattr(core, "_PROJECT_NAME", "Newname")
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"http://oldname.org/": ("<title>Newname</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {})
+    dt, src, _ = core.sitemap_date("http://oldname.org/", _now())
     assert (dt.year, dt.month) == (2026, 5) and src == "https://www.newname.org/sitemap.xml"
 
 
@@ -353,7 +357,7 @@ def test_a_truncated_gzip_sitemap_is_still_read(monkeypatch):
                       % (i, 1 + i % 12) for i in range(3000))
     whole = gzip.compress(('<urlset>%s</urlset>' % entries).encode())
     _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": whole[: len(whole) // 2]})
-    dt, _ = core.sitemap_date("https://x.org/", _now())
+    dt, _, _ = core.sitemap_date("https://x.org/", _now())
     assert (dt.year, dt.month) == (2025, 12)
 
 
@@ -515,7 +519,7 @@ def test_a_sitemap_that_lists_bare_paths_is_read_as_its_own_site(monkeypatch):
     _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml":
               '<urlset><url><loc>/orgs/a/</loc><lastmod>2026-01-12T22:57:14+00:00</lastmod>'
               '</url></urlset>'})
-    dt, _ = core.sitemap_date("https://x.org/", _now())
+    dt, _, _ = core.sitemap_date("https://x.org/", _now())
     assert (dt.year, dt.month) == (2026, 1)
 
 
@@ -1019,11 +1023,12 @@ def test_a_moved_homepage_trusts_its_new_host_for_the_sitemap(monkeypatch):
     monkeypatch.setattr(core, "_PAGE_FINAL", {})
     robots = ("Sitemap: https://newname.org/sitemap.xml\n", "https://newname.org/robots.txt")
     theirs = '<urlset><url><loc>https://newname.org/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
-    _fake_web(monkeypatch, core, {"https://x.org/": ("<html></html>", "https://newname.org/"),
+    monkeypatch.setattr(core, "_PROJECT_NAME", "Newname")
+    _fake_web(monkeypatch, core, {"https://x.org/": ("<html><title>Newname</title></html>", "https://newname.org/"),
                                   "https://x.org/robots.txt": robots,
                                   "https://newname.org/sitemap.xml": theirs})
     core.get_page_cached("https://x.org/")
-    dt, _ = core.sitemap_date("https://x.org/", _now())
+    dt, _, _ = core.sitemap_date("https://x.org/", _now())
     assert (dt.month, dt.day) == (9, 1)
 
 
@@ -1237,10 +1242,11 @@ def test_the_sitemap_is_read_where_the_homepage_landed(monkeypatch):
     monkeypatch.setattr(core, "_PAGE_CACHE", {})
     monkeypatch.setattr(core, "_PAGE_FINAL", {})
     theirs = '<urlset><url><loc>https://newname.org/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
-    _fake_web(monkeypatch, core, {"https://x.org/": ("<html></html>", "https://newname.org/"),
+    monkeypatch.setattr(core, "_PROJECT_NAME", "Newname")
+    _fake_web(monkeypatch, core, {"https://x.org/": ("<html><title>Newname</title></html>", "https://newname.org/"),
                                   "https://newname.org/sitemap.xml": theirs})
     core.get_page_cached("https://x.org/")
-    dt, _ = core.sitemap_date("https://x.org/", _now())
+    dt, _, _ = core.sitemap_date("https://x.org/", _now())
     assert (dt.month, dt.day) == (9, 1)
 
 
@@ -1289,3 +1295,129 @@ def test_a_page_picked_out_by_its_query_is_not_a_homepage(monkeypatch):
     # Tracking parameters do not make a page of the homepage.
     monkeypatch.setattr(core, "_archived_words", lambda ts, target: None)
     assert core.wayback_change_date("https://x.org/?utm_source=mail", now) is None
+
+
+# ── Review of 94fa810 ─────────────────────────────────────────────────────────
+
+def test_a_redirected_listing_keeps_its_own_path_for_the_sitemap(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {})
+    body = ('<urlset><url><loc>https://www.x.org/labs/a</loc><lastmod>2026-09-01</lastmod></url>'
+            '<url><loc>https://www.x.org/other</loc><lastmod>2026-10-01</lastmod></url></urlset>')
+    _fake_web(monkeypatch, core, {"https://x.org/labs/": ("<html></html>", "https://www.x.org/"),
+                                  "https://www.x.org/sitemap.xml": body})
+    core.get_page_cached("https://x.org/labs/")
+    dt, _, _ = core.sitemap_date("https://x.org/labs/", _now())
+    assert (dt.month, dt.day) == (9, 1)
+
+
+def test_the_listed_address_decides_whether_it_is_a_homepage(monkeypatch):
+    from liveliness import core
+    now = _now()
+    monkeypatch.setattr(core, "_PAGE_CACHE", {})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://www.x.org/home"})
+    rows = _churny_rows(now)
+    monkeypatch.setattr(core, "_cdx", lambda params: rows)
+    old = {"word%d" % i for i in range(40)}
+    new = {"term%d" % i for i in range(40)}
+    monkeypatch.setattr(core, "_archived_words", lambda ts, target: new if ts >= rows[8][0] else old)
+    assert core.wayback_change_date("https://x.org/", now) is not None
+
+
+def test_a_carousel_that_changes_every_capture_dates_nothing(monkeypatch):
+    from liveliness import core
+    now = _now()
+    rows = _churny_rows(now)
+    monkeypatch.setattr(core, "_cdx", lambda params: rows)
+    base = {"word%d" % i for i in range(40)}
+    def carousel(ts, target):
+        n = [r[0] for r in rows].index(ts)
+        return base | {"slide%d_%d" % (n, k) for k in range(12)}
+    monkeypatch.setattr(core, "_archived_words", carousel)
+    assert core.wayback_change_date("https://x.org/", now) is None
+
+
+def test_a_move_to_another_organisations_domain_is_not_trusted(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PROJECT_NAME", "Civic Widget")
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Big Funder Foundation</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://funder.org/grants"})
+    assert core.landed_url("https://x.org/") == "https://x.org/"
+    # The same organization's other host is trusted.
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://www.x.org/home"})
+    assert core.landed_url("https://x.org/") == "https://www.x.org/home"
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.co.uk/": "https://new.x.co.uk/"})
+    assert core.landed_url("https://x.co.uk/") == "https://new.x.co.uk/"
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://a.co.uk/": "https://b.co.uk/"})
+    assert core.landed_url("https://a.co.uk/") == "https://a.co.uk/"
+    # A new domain whose page names the project is the project moved.
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>Civic Widget | Home</title>", {})})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://civicwidget.io/"})
+    assert core.landed_url("https://x.org/") == "https://civicwidget.io/"
+
+
+def test_only_a_page_that_answered_records_where_it_landed(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {})
+    monkeypatch.setattr(core, "get_limited",
+                        lambda url, **k: _FakeResponse("https://elsewhere.x.org/blocked", "no", 403))
+    core.get_page_cached("https://x.org/")
+    assert core.landed_url("https://x.org/") == "https://x.org/"
+
+
+def test_an_old_sitemap_date_still_asks_the_archive(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    old = datetime.now(timezone.utc) - timedelta(days=400)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: core.SitemapFind(old, "s.xml"))
+    monkeypatch.setattr(core, "wayback_change_date",
+                        lambda u, now=None, **k: datetime.now(timezone.utc) - timedelta(days=20))
+    r = core.score_project(Project(name="x", website="https://x.org/"))
+    assert core.WAYBACK_LABEL in r["breakdown"] and r["score"] >= 45
+
+
+def test_the_root_tag_is_found_after_a_long_preamble(monkeypatch):
+    import time
+    from liveliness import core
+    body = ('<?xml version="1.0"?>\n<?xml-stylesheet href="/s.xsl"?>\n<!--' + "x" * 6000 + '-->\n'
+            '<urlset><url><loc>https://x.org/a</loc><lastmod>2026-09-01</lastmod></url></urlset>')
+    _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": body})
+    got = core._sitemap_body("https://x.org/sitemap.xml", time.monotonic() + 10)
+    assert got is not None and core.parse_sitemap(got[0])[0] == "urlset"
+    page = '<!doctype html><html><body>' + "y" * 6000 + '<urlset></urlset></body></html>'
+    _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": page})
+    assert core._sitemap_body("https://x.org/sitemap.xml", time.monotonic() + 10) is None
+
+
+def test_the_last_resorts_stop_at_the_record_deadline(monkeypatch):
+    import time
+    from liveliness import core
+    seen = _fake_web(monkeypatch, core, {})
+    assert core.sitemap_date("https://x.org/", _now(), deadline=time.monotonic() - 1) is None
+    assert seen == []
+    def never(params):
+        raise AssertionError("past the deadline")
+    monkeypatch.setattr(core, "_cdx", never)
+    assert core.wayback_change_date("https://x.org/", _now(), deadline=time.monotonic() - 1) is None
+
+
+def test_score_project_passes_its_deadline_to_the_last_resorts(monkeypatch):
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    got = {}
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, deadline=None: got.__setitem__("s", deadline))
+    monkeypatch.setattr(core, "wayback_change_date",
+                        lambda u, now=None, deadline=None: got.__setitem__("w", deadline))
+    core.score_project(Project(name="x", website="https://x.org/"), budget_s=50)
+    assert got.get("s") is not None and got.get("w") is not None
+
+
+def test_the_newest_sitemap_entry_comes_with_its_file():
+    from datetime import datetime, timezone
+    from liveliness import core
+    entries = [("https://x.org/a", "2026-09-01", "s1.xml"), ("https://x.org/b", "2026-01-01", "s2.xml")]
+    assert core.sitemap_newest_entry(entries, _now()) == (datetime(2026, 9, 1, tzinfo=timezone.utc), "s1.xml")
+    assert core.SitemapFind._fields == ("date", "source", "build")
