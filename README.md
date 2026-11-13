@@ -33,7 +33,7 @@ result = score_project(Project(
 
 result["score"]               # 0 to 100, or None when there was nothing to go on
 result["activity_status"]     # Active | Likely Active | Possibly Inactive | Inactive | Unknown
-result["last_activity_date"]  # the most recent date found, ISO 8601, or None
+result["last_activity_date"]  # the most recent date from the project itself, ISO 8601, or None
 result["status"]              # Active | Inactive | N/A, only where it is unambiguous
 result["breakdown"]           # the reasoning, line by line
 result["discovered_url"]      # the homepage, when the website given was an article about the project
@@ -46,6 +46,8 @@ To log each step:
 from liveliness import set_logger
 set_logger(print)
 ```
+
+To cap the time one project takes, pass `budget_s`: `score_project(project, budget_s=110)` stops the sitemap and Wayback Machine checks, which run last, once that many seconds have passed. Without it, those two checks get 40 seconds between them. Either way the sitemap gets at most 15 seconds, so the archive keeps at least the rest, and each request's timeouts are cut to fit the time left. The limit is close to a hard stop: a request that follows redirects can run over by about one timeout per extra redirect. The site's name lookup, which request timeouts don't cover, gets its own limit before the sitemap is read.
 
 `Project` requires only a name. Other fields are used when present, and an empty field never lowers the score. `liveliness/project.py` documents each one.
 
@@ -74,6 +76,8 @@ When the rules find no date and no statement that a project has ended, the score
 | News pages | Up to two of the site's own blog, news, updates or events pages, found through the homepage's links. The newest dated item counts like a blog post. |
 | Social | Last post date for YouTube, Bluesky, Medium, Reddit, Substack, and Mastodon or other fediverse accounts. X, LinkedIn, Facebook, Instagram, TikTok and Signal don't expose post dates, so they are only checked for being reachable. |
 | The page itself | Dates the homepage gives for itself, a recent copyright year in the footer, and any statement that the project has closed. |
+| Sitemap | Only when nothing the project left is dated within the last 18 months: the newest change the site's sitemap lists for the address. |
+| Wayback Machine | Under the same condition, when the sitemap has no date or only one over a year old: the last time the Internet Archive saw the page change. |
 
 ### Website
 
@@ -111,6 +115,46 @@ The scorer looks for a closure notice in the first 3,000 characters of the page 
 
 About one in ten reachable sites sends an empty shell and builds its text in the browser. A page with fewer than 200 characters of readable text is read again with a headless browser. If it still can't be read, it is recorded as unread, and its footer copyright doesn't count.
 
+### Last resorts
+
+The scorer checks two more sources only when nothing the project left is dated within the last 18 months: no recent code, feed, social post, news page or date on the page. Both cost extra requests and both are weaker evidence, so a listing with a recent dated signal never reaches them. An older signal, such as a three-year-old commit, doesn't stop the search for something newer. Both can raise a listing out of Unknown, and neither can lower a score.
+
+The scorer skips both when the site did not respond, the page has moved or the listed address is an archive snapshot, even one whose original still answers, because they would date something that is no longer the project. For a site behind a bot check, it asks only the Wayback Machine, because the same bot check blocks the sitemap.
+
+**Sitemap.** The scorer reads the sitemaps named in the site's `robots.txt` first, then `/sitemap.xml`, `/sitemap_index.xml` and `/wp-sitemap.xml`, and stops at the first one that lists any date, even an old one, because the other names usually serve the same list. An old date still leads to asking the Wayback Machine. It reads up to 10 MB of a sitemap, so a long file's newest entries at the end are read. It follows a sitemap index two levels down and reads up to four child sitemaps from each. It reads children named for the listing's section first, such as `lab-sitemap.xml` for a page under `/lab/`, then the newest, and judges all the entries under one index together. The whole search stops at eight requests or 25 seconds. A sitemap's root element is found after any XML declaration, stylesheet line or comment, however long.
+
+When the address points to a section of a site, only entries at or under that address count. A language root such as `/en/` or `/pt-br/` is the whole site, because many sitemaps list only the default language's pages. For the same reason a deeper listing under a language root, such as `/en/labs/civic`, also counts entries under `/labs/civic`. Only real ISO 639-1 language codes count, so `/ai/` or `/us/` stays a section. The lab's own pages date a lab's page on a university site, not the university's news. A language root before the section, as in `/en/labs/`, is skipped when the scorer picks which child sitemaps to read first. The scorer skips entries on another site, because `robots.txt` can name someone else's sitemap. When the homepage redirects to the same organization's site, the scorer looks for the sitemap on the host where the homepage landed and keeps entries on that host, so it can read a site that moved under its new name. A listed front page means the whole site counts, on whatever host it landed. A listed deeper page means the section it landed in counts, which is its own path when it didn't move. A redirect to the same host, with or without `www`, is the same site. A redirect up to a parent host, such as `civiclab.uni.edu` to `www.uni.edu`, never counts, because that is the parent's site. A redirect from the front page of the apex or `www` host down into one of its own subdomains counts, because that is the organization redirecting into its own site. That doesn't apply on a shared host such as `medium.com` or `github.io`, where each subdomain belongs to someone else. A deeper page that redirects up its own path (`/projects/foo` to `/projects/` or `/`), to the front page of one of the site's subdomains, or to an error page (a whole path segment such as `/404`, `/not-found` or `/error.html`) was removed. A move to a different path, such as `/tools/foo` to `/projects/foo`, is a real move. A redirect from one subdomain to a sibling or deeper one, or to another registered domain, never counts, however the page there is titled, because a funder's or a parent organization's page can carry the project's name. A listed homepage that itself reads as parked or for sale skips the sitemap and the Wayback Machine. A listed page that now redirects to its site's front page was removed, so the scorer keeps to the listed address. Registered domains come from the Public Suffix List, read from the copy bundled with the `tldextract` package, never fetched. On shared hosts such as `github.io`, `netlify.app` or `substack.com`, each customer's subdomain is its own site. A move that lands on a parking or for-sale page is never trusted, even within the same site, such as a lapsed domain whose `www` serves a parking page. That is judged on the page the move landed on: a known parking host, or a short page of under 150 words whose wording is about selling or parking the domain, such as "this domain is for sale", "buy this domain" or "domain is parked". A shop's "for sale" or "make an offer" doesn't count, and neither does "this domain" on its own, as in a licence line. A sitemap address that redirects counts only to the same host, `www` or not, or from a listed front page on the apex into one of its own subdomains. It never counts up to a parent host or to a sibling subdomain. Hosts are compared without default ports, and paths without case. Where `robots.txt` itself redirects doesn't count.
+
+The scorer skips the sitemap when a query string picks out the page, such as `project.php?id=12`, because it can't tell which entry is that page. It asks the Wayback Machine about the address with its query. When the homepage redirects, it asks about the page the homepage lands on. For a `#/` or `#!/` route it skips both sources, because the browser builds that page and the archive only sees the shell.
+
+The newest `lastmod` counts like a date the page gives for itself, but only if it is 18 months old or newer. At 18 months it scores 40, and the 5 points for a responding site bring it to 45, the bottom of Likely Active. An older `lastmod` counts for nothing, and the scorer asks the Wayback Machine instead. It also asks the archive when the sitemap's newest date is over a year old, and the higher of the two scores counts. When the sitemap holds both a page date over a year old and a recent publish, the publish counts, because it scores higher, and the page date is still reported as the last activity date.
+
+The scorer judges these rules on every entry on the site before it picks out the listing's section, because a regeneration stamps the whole file and a section of a few pages would slip under every threshold. These `lastmod` values don't count:
+
+- A date of today or yesterday, because a sitemap generated on each request stamps every entry with the request time.
+- A date on a page the CMS creates on install, such as WordPress's `/sample-page/` and `/hello-world/`, because it says the site was installed, not kept up.
+- One day carrying at least 1,000 entries and at least half the file, because a large site restamped in one day is the platform regenerating its sitemap. The scorer sets those aside like a generator pass.
+- One run of times shared by at least five entries, or one bare date shared by at least twenty (a timestamp of exactly midnight counts as a bare date), when it covers at least 80% of the dated entries, because a generator wrote those entries in one pass. Times count as one run while each is within two minutes of the one before and the run spans no more than half an hour, after converting each to UTC, so a run that crosses midnight or mixes time zones is still one run. The scorer sets them aside even when they are the newest, and dates the site from the rest, if anything is left. If nothing is left and the pass is within the last year, it counts as a publish of the whole site: someone is keeping the site up. A publish scores 45, the same as a Wayback Machine change, never earns the points for a responding website, and isn't reported as the last activity date.
+
+**Wayback Machine.** The Internet Archive stores a hash of each capture, so a new hash means the content changed. The scorer asks for every day the archive captured the address over the last 400 days, one capture a day, and needs captures on at least four different days. When the archive gives up on that query for a heavily archived page and answers with nothing, the scorer asks again for the latest 60 days of captures, and dates the page from the hashes alone, since the text comparison needs captures six months and a year back. It counts revisits, where the archive saw the same content again. It asks the archive for HTML captures and revisits only, so the one capture kept for each day is a real one, and drops archived records under 400 bytes, which are usually the archive hitting a bot check or a redirect. The archive later getting past the check is not the site changing.
+
+The first capture of the current content dates the last change. The scorer uses the date only if both that capture and the one before it fall within the last year. The archive's capture schedule is too weak evidence to call a project stopped, and after a long gap between captures the change could have come at any point in it. The scorer ignores a page that didn't change across those captures, because its last change came before them.
+
+In a sample of 60 undated listings checked in November 2026, 48 got a new hash on nearly every capture, from a form token, a rotating banner or two versions the server alternates between. When over half the recent captures differ from the one before, or the page flips back to an earlier version, the hashes can't date a change.
+
+For a homepage, including a language root such as `/en/`, the scorer then reads the archived pages themselves, when the page the homepage lands on is a homepage too. It reads at most five: the newest capture and the one before it, which must agree, so the current text is settled; the one nearest six months back; the one nearest a year back if the six-month one reads the same; and one beside the capture that differs. The current text must differ from every earlier text read, so a page alternating between two versions dates nothing. A change needs at least 10 different words, so digits, dates and counters don't count. The first capture after the last one read with the earlier text dates the change, which is the earliest the current text can have appeared. A change counts only when the earlier text held for at least two captures, so a carousel or feed that rewrites part of the page on every capture dates nothing. The scorer skips any that are bot checks, have fewer than 30 words or meet a server error, and counts nothing if the text didn't change within the year.
+
+A deeper page, or one picked out by its query string, keeps to the hashes. On an institution's site such a page's text changes with the host's news box, not with the listing.
+
+The scorer doesn't use the archive when:
+
+- The page builds its text in the browser, because its script file gets a new name on every deploy.
+- A footer copyright from this year or last already sets the same floor.
+
+The archive is the main way to reach sites that block this checker. It is weak evidence: a change within a year scores 45, the same as a recent footer copyright. It never earns the points for a responding website, and the scorer doesn't report it as the last activity date, because it records when the archive looked, not anything the project did.
+
+The archive allows about 15 requests a minute, so the scorer waits four seconds between requests. After a refusal (429), or two archive searches in a row that had a fair chance and got no answer or a server error (a timeout of at least five seconds; an archive search always gets at least five, and is started only when three such timeouts and a short read still fit in the time left), it leaves the archive alone for ten minutes and counts those as no evidence. A search the scorer cut below five seconds to fit its time limit, or a failed or erroring year-long search it is about to retry with a shorter one, doesn't count toward that.
+
 ### Dates
 
 Dates more than a day in the future, or before 2000, are discarded. Publishers set their own commit, feed and post dates, and a wrong clock would otherwise keep a score at the top.
@@ -123,24 +167,24 @@ Dates more than a day in the future, or before 2000, are discarded. Publishers s
 
 Each dated signal gets points by age. The best single signal sets the base score. Signals are not added together.
 
-| Age of the date | GitHub, blog, news page | The page's own date | Social post |
-| --- | --- | --- | --- |
-| 90 days or less | 85 | 70 | 55 |
-| 180 days or less | 80 | 65 | 50 |
-| 1 year or less | 70 | 55 | 45 |
-| 18 months or less | 55 | 40 | 0 |
-| 3 years or less | 35 | 25 | 0 |
-| 5 years or less | 15 | 10 | 0 |
-| Older | 5 | 3 | 0 |
+| Age of the date | GitHub, blog, news page | The page's own date, sitemap | Social post | Wayback Machine change |
+| --- | --- | --- | --- | --- |
+| 90 days or less | 85 | 70 | 55 | 45 |
+| 180 days or less | 80 | 65 | 50 | 45 |
+| 1 year or less | 70 | 55 | 45 | 45 |
+| 18 months or less | 55 | 40 | 0 | 0 |
+| 3 years or less | 35 | 25 (not sitemap) | 0 | 0 |
+| 5 years or less | 15 | 10 (not sitemap) | 0 | 0 |
+| Older | 5 | 3 (not sitemap) | 0 | 0 |
 
-A date the page gives for itself scores lower than a commit, because content systems update `dateModified` when a template changes and hand-written "last updated" lines go stale. It scores higher than a social post because it comes from the project's own site. An archived GitHub repository counts for at most 15.
+A date the page gives for itself scores lower than a commit, because content systems update `dateModified` when a template changes and hand-written "last updated" lines go stale. It scores higher than a social post because it comes from the project's own site. A sitemap `lastmod` is the site giving the same kind of date in another file, so it scores the same, up to 18 months old. A Wayback Machine change within a year scores 45, the same floor as a recent footer copyright, because both show that someone is keeping the page up. An archived GitHub repository counts for at most 15.
 
 The scorer then adjusts the base score in this order, keeping it between 0 and 100:
 
 1. **Issue resolution.** Closing or merging at least half of recent issue traffic adds 5. Closing none subtracts 5. Anything in between changes nothing. Archived repositories are skipped.
 2. **Website.** One of these applies:
    - The address is an archive snapshot and the original doesn't answer: capped at 10.
-   - The site responds: plus 15 if the newest dated signal is within a year, plus 5 if it is older or there is none.
+   - The site responds: plus 15 if the newest dated signal is within a year, plus 5 if it is older or there is none. A Wayback Machine change doesn't count as a dated signal here.
    - The listed page has moved but the site still answers: minus 15.
    - The address no longer exists: minus 50.
    - The site did not respond: minus 50.
@@ -160,13 +204,13 @@ The floors at 45 and 60 only raise scores. They never lower a higher one.
 
 ### Unknown
 
-When the scorer finds no dates, and no closure, recent launch, recent copyright or archive snapshot, the result is Unknown and `score` is `None`. A website that loads only shows the address still works, so it isn't scored on its own. A site that doesn't respond is scored, not Unknown.
+When the scorer finds no dates, including in the sitemap and the Wayback Machine, and no closure, recent launch, recent copyright or archive snapshot, the result is Unknown and `score` is `None`. A website that loads only shows the address still works, so it isn't scored on its own. A site that doesn't respond is scored, not Unknown.
 
 ### Status
 
 `status` is stricter than `activity_status` and is only set at the ends of the range:
 
-- **Active** at 70 and above.
+- **Active** at 70 and above, unless the signal that set the score came from the sitemap or the Wayback Machine. Those are too weak to set Status, so it stays empty, even when an older signal of the project's own sits beside them.
 - **Inactive** below 20, and only when the site can't be reached or the page says the project has closed. The scorer checks an unreachable site once more, after five seconds. A moved page never counts as unreachable. A low score on a site that still loads leaves `status` empty, because an old guide or dataset is still usable while it's online.
 - **N/A** for a finished piece of work, such as a report or a book. A project that also has an ongoing type, such as an organization that published a report, is scored normally.
 - Empty otherwise.
@@ -190,7 +234,7 @@ Each line shows the points actually applied, so the lines add up to the total. W
 
 Some pages need reading, not keyword matching. A conference closes registration because it is about to happen, and a consultation closes because it is over. Both pages say "closed".
 
-When the scorer can read a page but finds no date, no news page and no closure, it sets `adjudication` to the project's name, address and up to 6,000 characters of page text. The score doesn't change. The Field Guide sends these pages to a language model, and a person must approve any reading that would mark a project inactive. `eval/README.md` describes the testing.
+When the scorer can read a page but finds no date, no news page and no closure, it sets `adjudication` to the project's name, address and up to 6,000 characters of page text. A sitemap or Wayback Machine date doesn't change this, because a homepage rewritten to announce a closure is exactly the change the archive sees. The score doesn't change. The Field Guide sends these pages to a language model, and a person must approve any reading that would mark a project inactive. `eval/README.md` describes the testing.
 
 The evaluation set is not published because it contains copies of other people's web pages.
 

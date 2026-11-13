@@ -18,6 +18,7 @@ from .core import (
     close_browser,
     is_finished_work,
     score_project,
+    score_to_activity_status,
     score_to_status,
     set_logger,
 )
@@ -26,6 +27,7 @@ from .project import Project
 __all__ = [
     "Project",
     "score_project",
+    "score_to_activity_status",
     "score_to_status",
     "set_logger",
     "close_browser",

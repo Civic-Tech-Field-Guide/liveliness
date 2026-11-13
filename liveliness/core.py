@@ -25,16 +25,22 @@ it, a YouTube channel is checked for reachability but not for its last upload).
 """
 
 import json
+from html import unescape as html_unescape
 import os
 import re
 import socket
+import threading
 import time
+import zlib
+from collections import Counter
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 from html.parser import HTMLParser as _HTMLParser
-from urllib.parse import urljoin, parse_qs, urlparse
+from urllib.parse import urljoin, parse_qs, parse_qsl, urlencode, urlparse
 
 import requests
+import tldextract
 
 try:
     import feedparser
@@ -94,6 +100,9 @@ class _LimitedResponse:
 
 
 _PAGE_CACHE = {}
+# Where each cached page's request ended up, after redirects, for a page that
+# answered 200. The last resorts read it to know where a homepage moved.
+_PAGE_FINAL = {}
 
 
 def get_page_cached(url):
@@ -109,6 +118,8 @@ def get_page_cached(url):
         return _PAGE_CACHE[url]
     try:
         r = get_limited(url)
+        if r.url and r.status_code == 200:
+            _PAGE_FINAL[url] = r.url
         val = (r.text, dict(r.headers)) if r.status_code == 200 else (None, None)
     except Exception:
         val = (None, None)
@@ -116,19 +127,209 @@ def get_page_cached(url):
     return val
 
 
-def get_limited(url, timeout=10, headers=None):
-    """GET that stops reading at MAX_FETCH_BYTES or FETCH_DEADLINE_S of
-    wall-clock time, whichever comes first. Raises like requests.get.
+# Hosts that give each customer a subdomain but that the Public Suffix List
+# does not list (checked against tldextract's snapshot, 2026-11). Each tenant
+# is its own site, so alice.substack.com and bob.substack.com are two owners.
+_SHARED_HOSTING = ("wordpress.com", "squarespace.com", "substack.com", "medium.com")
+
+
+# The Public Suffix List as tldextract bundles it, read from the package and
+# never fetched, with its private section, which already treats hosts such as
+# github.io, netlify.app and blogspot.com as public suffixes.
+_PSL = tldextract.TLDExtract(suffix_list_urls=(), cache_dir=None, include_psl_private_domains=True,
+                             extra_suffixes=list(_SHARED_HOSTING))
+
+
+def _registrable(host):
+    """The part of a host its owner registered: x.org, x.co.uk, x.gov.br, x.github.io."""
+    host = (host or "").lower().rstrip(".")
+    parts = _PSL(host)
+    if parts.domain and parts.suffix:
+        return parts.domain + "." + parts.suffix
+    return host
+
+
+def _page_titles(html):
+    """The <title>, og:title and og:site_name of a page."""
+    head = (html or "")[:200_000]
+    found = [html_unescape(t).strip() for t in re.findall(r"<title[^>]*>([\s\S]*?)</title>", head, re.I)]
+    found += [v for v in (meta_content(head, "og:title"), meta_content(head, "og:site_name")) if v]
+    return found
+
+
+# Where a lapsed domain goes: a registrar's parking page or a marketplace
+# listing it for sale.
+_PARKING_HOSTS = ("sedo.com", "sedoparking.com", "dan.com", "afternic.com", "hugedomains.com",
+                  "godaddy.com", "parkingcrew.net", "bodis.com", "above.com", "undeveloped.com",
+                  "domainmarket.com", "buydomains.com", "porkbun.com", "namecheap.com",
+                  "parklogic.com", "uniregistry.com", "atom.com", "squadhelp.com")
+# Only wording about selling or parking the domain itself. "For sale" or "make
+# an offer" alone is what a shop says, and "this domain" alone is what a
+# licence line says ("all content on this domain is CC-BY").
+_PARKED_TEXT = re.compile(
+    r"this domain (?:name )?(?:is|may be) for sale|domain (?:name )?(?:is |may be )?for sale|"
+    r"buy this domain|inquire about this domain|domain (?:is )?parked|parked free|"
+    r"domain has expired|renew (?:this|your) domain", re.I)
+
+
+PARKED_MAX_WORDS = 150   # visible words; a parking page has fewer
+
+
+def _looks_parked(listed, new, html=None, text=None):
+    """
+    True when a move lands on a parking or for-sale page: a known parking
+    host, or a short page with the wording. `html` is the page the move
+    landed on; without it, the cached homepage the listed address served.
+    """
+    host = _site_host(new)
+    if any(host == h or host.endswith("." + h) for h in _PARKING_HOSTS):
+        return True
+    if html is None:
+        html = (_PAGE_CACHE.get(listed) or (None, None))[0] or ""
+    # A parking page is a few lines. A real homepage that says "tickets for
+    # sale" somewhere is not one, so the wording counts only on a short page.
+    visible = text if text is not None else readable_page(html[:200_000], text_cap=200_000)["text"]
+    if len(visible.split()) >= PARKED_MAX_WORDS:
+        return False
+    # The title and og: names are in the head, outside the visible text.
+    titles = " ".join(_page_titles(html))
+    return bool(_PARKED_TEXT.search(titles + " " + visible))
+
+
+def trusted_move(listed, new, check_parked=True, start=None):
+    """
+    True when `new` is the listed site under another address rather than
+    somebody else's site.
+
+    The same host, with or without www and on either scheme, is the same
+    site. A move from the front page of the apex or www host into one of its
+    own subdomains is the organization redirecting into its own site. Nothing
+    else is trusted: not a move up to a parent host (civiclab.uni.edu to
+    www.uni.edu), which is the parent's site; not a move to a sibling or
+    deeper subdomain; and not a move to another registered domain, however the
+    page there is titled, since a funder's or a parent's page can carry the
+    project's name. A move that lands on a parking or for-sale page is never
+    trusted (check_parked), on the same site or off it.
+
+    `start` is where the move began, when that is not the listed address
+    itself, as for a sitemap address that redirected; a sitemap redirect
+    passes check_parked=False and checks the sitemap it landed on itself.
+    """
+    sh, nh = _site_host(start or listed), _site_host(new)
+    # The parked check reads the page the move landed on: the cached homepage
+    # fetch followed the redirect, so its text is the landed page's.
+    if check_parked and _looks_parked(listed, new):
+        return False
+    if sh == nh:
+        return True
+    # Down from the apex only when the apex is a registered domain someone
+    # owns: medium.com or github.io is a host for many owners, and a move to
+    # one of its subdomains is a move to someone else's site.
+    return (sh == _registrable(sh) and bool(_PSL(sh).domain)
+            and nh.endswith("." + sh) and _path_prefix(listed) == "")
+
+
+# A path segment that is an error page in its own right, whole: /404,
+# /not-found.html, /error. Not /error-reporting or /404-campaign.
+_ERROR_SEGMENT = re.compile(r"^(?:error|404|410|not-found|page-not-found|notfound)(?:\.(?:html?|php))?$", re.I)
+
+
+def _removed_page(url, final):
+    """
+    True when a deep listed page now sends visitors somewhere that says it is
+    gone: up its own path (/projects/foo to /projects/ or /), to a front page,
+    or to an error page. A move to a different path is a real move.
+    """
+    if _path_prefix(url) == "":
+        return False
+    listed = (urlparse(url).path or "").rstrip("/").lower()
+    landed = (urlparse(final).path or "").rstrip("/").lower()
+    if _path_prefix(final) == "" or listed.startswith(landed + "/"):
+        return True
+    return any(_ERROR_SEGMENT.match(seg) for seg in landed.split("/") if seg)
+
+
+def landed_url(url, check_parked=True):
+    """
+    Where the listed page's own request ended up, or url itself. Only an
+    http(s) address that is not an archive, and is the same organization's
+    site (trusted_move), counts as where the site moved. A caller that has
+    already ruled out a parked landing passes check_parked=False.
+    """
+    final = _PAGE_FINAL.get(url)
+    if not final or not final.lower().startswith(("http://", "https://")) or is_archive_host(final):
+        return url
+    if not trusted_move(url, final, check_parked=check_parked):
+        return url
+    # A deep page that now goes up its own path, to a front page or to an
+    # error page was removed. Where it lands is the organization's, not the
+    # listing's, so it dates nothing here.
+    if _removed_page(url, final):
+        return url
+    return final
+
+
+# The timed name lookups (host_resolves with a timeout) run on at most
+# LOOKUP_WORKERS daemon threads at once.
+LOOKUP_WORKERS = 4
+# A slot, taken before a lookup thread starts and given back when the lookup
+# ends, however it ends. With every slot held by a hung lookup, the answer is
+# "unknown" at once rather than a place in a queue. The threads are daemons,
+# so a lookup still hanging cannot hold up the end of a run.
+_LOOKUP_SLOTS = threading.BoundedSemaphore(LOOKUP_WORKERS)
+
+
+def request_caps(remaining, cap):
+    """
+    The timeout for one get_limited call that must finish within `remaining`
+    seconds: a quarter of it, at most `cap`. requests applies its timeout to
+    the connection, to the response headers and to each chunk, and the body
+    loop checks its deadline only between chunks, so the worst case is three
+    timeouts plus the body deadline, which body_deadline() gives.
+
+    The stop is approximate: requests applies the timeout to each redirect hop
+    afresh, so a request that follows redirects can run over by about one
+    timeout per extra hop.
+    """
+    return min(cap, max(remaining, 0) / 4)
+
+
+def get_within(url, deadline, cap, timeout=None, **kw):
+    """
+    get_limited, with its timeouts fitted to the time left before `deadline`
+    (a time.monotonic() value), each at most `cap`. Without a deadline both
+    are `cap`. A caller that already worked out the timeout passes it.
+    Raises like get_limited.
+    """
+    if deadline is None:
+        return get_limited(url, timeout=timeout or cap, deadline_s=cap, **kw)
+    remaining = deadline - time.monotonic()
+    if timeout is None:
+        timeout = request_caps(remaining, cap)
+    return get_limited(url, timeout=timeout, deadline_s=body_deadline(remaining, timeout), **kw)
+
+
+def body_deadline(remaining, timeout):
+    """The body deadline that, with three timeouts, fits in `remaining`: at least half a second."""
+    return max(remaining - 3 * timeout, 0.5)
+
+
+def get_limited(url, timeout=10, headers=None, deadline_s=None, max_bytes=None):
+    """GET that stops reading at MAX_FETCH_BYTES (or max_bytes) or
+    FETCH_DEADLINE_S of wall-clock time, whichever comes first. Raises like
+    requests.get.
     A server dripping bytes too slowly to ever fill a chunk can still hold
     the read open — the per-record SIGALRM budget is the backstop there."""
+    limit = FETCH_DEADLINE_S if deadline_s is None else min(deadline_s, FETCH_DEADLINE_S)
     r = SESSION.get(url, timeout=timeout, allow_redirects=True, stream=True,
                     headers=headers)
+    cap = max_bytes or MAX_FETCH_BYTES
     start, size, chunks = time.monotonic(), 0, []
     try:
         for chunk in r.iter_content(chunk_size=8192):
             chunks.append(chunk)
             size += len(chunk)
-            if size >= MAX_FETCH_BYTES or time.monotonic() - start > FETCH_DEADLINE_S:
+            if size >= cap or time.monotonic() - start > limit:
                 break
     finally:
         r.close()
@@ -489,9 +690,15 @@ def _doh_resolves(host):
     return False if said_no else None
 
 
-def host_resolves(url):
+def host_resolves(url, timeout=None):
     """
     False only when the hostname genuinely does not resolve.
+
+    With `timeout`, the lookup runs on a daemon thread and is given up after
+    that many seconds, or not started when every lookup slot is busy, since request timeouts do not cover it and a
+    lookup that hangs can take half a minute. Given up, or failing, the answer
+    is None: unknown. The public-resolver check is skipped then, to keep to
+    the time.
 
     A dangling CNAME looks like this: the record exists and points somewhere
     that no longer does, so a lookup succeeds with no address. Any error other
@@ -505,6 +712,27 @@ def host_resolves(url):
     host = (urlparse(url).hostname or "").strip()
     if not host:
         return None
+    if timeout is not None:
+        if not _LOOKUP_SLOTS.acquire(blocking=False):
+            return None
+        done, result = threading.Event(), {}
+
+        def look():
+            try:
+                socket.getaddrinfo(host, None)
+                result["ok"] = True
+            except Exception:
+                result["ok"] = False
+            finally:
+                _LOOKUP_SLOTS.release()
+                done.set()
+        try:
+            threading.Thread(target=look, daemon=True, name="lookup").start()
+        except Exception:
+            _LOOKUP_SLOTS.release()
+            return None
+        done.wait(max(timeout, 0))
+        return True if result.get("ok") else None
     try:
         socket.getaddrinfo(host, None)
         return True
@@ -955,10 +1183,9 @@ def discover_social_links(website_url):
         for href, _ in parser.links:
             if not href.startswith("http"):
                 continue
-            netloc = _netloc(href)
-            if netloc is None:
+            if _netloc(href) is None:
                 continue
-            netloc = netloc.removeprefix("www.")
+            netloc = _site_host(href)
             if netloc in _SOCIAL_DOMAINS and netloc not in found:
                 found[netloc] = href
         return list(found.values())
@@ -1376,12 +1603,19 @@ def _clean(s):
 
 
 def meta_content(html, prop):
-    """A <meta> content value by property or name, either attribute order."""
-    for pattern in (r'<meta[^>]+(?:property|name)=["\']%s["\'][^>]+content=["\']([^"\']*)["\']',
-                    r'<meta[^>]+content=["\']([^"\']*)["\'][^>]+(?:property|name)=["\']%s["\']'):
-        m = re.search(pattern % re.escape(prop), html, re.I)
-        if m and m.group(1).strip():
-            return _decode_entities(m.group(1).strip())
+    """
+    A <meta> content value by property or name. The tag's attributes are read
+    in whatever order and quoting the page uses, so a content="Bob's Widget"
+    before its property still counts.
+    """
+    want = prop.lower()
+    for tag in re.findall(r"<meta\b[^>]*>", html or "", re.I):
+        attrs = {k.lower(): v1 if v1 or not v2 else v2
+                 for k, v1, v2 in re.findall(r'([\w:-]+)\s*=\s*(?:"([^"]*)"|\'([^\']*)\')', tag)}
+        if want in (attrs.get("property", "").lower(), attrs.get("name", "").lower()):
+            value = (attrs.get("content") or "").strip()
+            if value:
+                return _decode_entities(value)
     return None
 
 
@@ -1767,6 +2001,1077 @@ def latest_news_date(html, base_url, now):
     return best
 
 
+# Where "a while ago" stops meaning likely active. A project silent for longer
+# than this has to clear Possibly Inactive on other evidence. The sitemap's age
+# limit below is the same eighteen months.
+STALE_AFTER_DAYS = 548   # eighteen months
+
+
+# ── The site's sitemap ────────────────────────────────────────────────────────
+#
+# A site that prints no date on its homepage often lists one for every page in
+# its sitemap. Read only when nothing else dated was found, since it costs up to
+# SITEMAP_MAX_FETCHES requests and a dated signal already found is better
+# evidence than a file visitors do not read.
+#
+# Two things make a sitemap date wrong, and both are guarded against. A sitemap
+# built on each request stamps every entry with the time of the request, which
+# is the same trap as the Last-Modified header, so the same two-day rule
+# applies. A sitemap rebuilt by a deploy stamps entries with the build time,
+# which says a build ran rather than that anything on the site changed. Such a
+# pass (sitemap_newest_entry: one run of stamps on 80% of the entries, or one
+# day carrying 1,000 entries and half the file) is set aside as a publish and
+# scores like a change the archive saw, never like a page's own date.
+
+SITEMAP_PATHS           = ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml")
+SITEMAP_MAX_FETCHES     = 8     # robots.txt included
+SITEMAP_MAX_DEPTH       = 2     # an index, and an index inside it
+SITEMAP_CHILDREN        = 4     # child sitemaps read from each index
+SITEMAP_DEADLINE_S      = 25    # wall clock for the whole search
+SITEMAP_TIMEOUT_S       = 8
+SITEMAP_STAMP_MIN_COUNT = 5     # entries that must share a timed stamp to call it a build
+# A bare date is coarse: a small site whose few pages were all edited on one
+# day looks the same as a build. It takes this many entries to call it one.
+SITEMAP_DAY_STAMP_MIN_COUNT = 20
+SITEMAP_LABEL           = "Newest change listed in the site's sitemap"
+SITEMAP_BUILD_LABEL     = "Whole-site publish listed in the site's sitemap"
+
+
+class SitemapFind(NamedTuple):
+    """
+    (date, sitemap url, build) from sitemap_date(). build is True when the
+    best date is a pass that stamped the site at once (a build pass, as
+    sitemap_newest_entry defines one): somebody
+    published the site, which says it is kept up and no more, so it scores
+    like a change the archive saw rather than like a page's own date.
+    """
+    date: datetime
+    source: str
+    build: bool = False
+    # With a build, the newest page date the same file listed, when there is
+    # one: older than the publish and scoring lower, but still the newest date
+    # the site gave for a page, so it is reported as the last activity.
+    page_date: datetime | None = None
+# The sitemap may lift a listing out of Unknown and never push one down. A
+# lastmod up to eighteen months old scores 40 as the site's own date, and the 5
+# a responding site earns brings that to 45, the foot of Likely Active. Older
+# dates would land a live site in Possibly Inactive or Inactive on the strength
+# of a file visitors do not read, so they count for nothing and the archive
+# is asked instead.
+SITEMAP_MAX_AGE_DAYS    = STALE_AFTER_DAYS
+# A sitemap can list its newest entries last, and a plain
+# urlset of 25,000 entries runs to a few megabytes, so it gets a larger cap
+# than a page. The deadline still bounds the read.
+SITEMAP_MAX_BYTES       = 10_000_000
+
+_SITEMAP_ENTRY_RE = re.compile(r"<(?:\w+:)?(url|sitemap)\b[^>]*>([\s\S]*?)</(?:\w+:)?\1\s*>", re.I)
+# The image, video and news extensions put a <loc> of their own inside an
+# entry, and one of those can come before the page's own address.
+_SITEMAP_LOC_RE   = re.compile(r"<(?!(?:image|video|news|xhtml):)(?:\w+:)?loc\b[^>]*>"
+                               r"\s*(?:<!\[CDATA\[)?\s*([^<\]\s]+)", re.I)
+_SITEMAP_MOD_RE   = re.compile(r"<(?:\w+:)?lastmod\b[^>]*>\s*([^<\s]+)", re.I)
+SITEMAP_MAX_TEXT_BYTES = 8_000_000     # unpacked size kept from a .gz sitemap
+SITEMAP_BUILD_SHARE    = 0.8           # share of entries on one day that means a build
+
+
+def _gunzip_prefix(body):
+    """
+    As much of a gzip body as unpacks, capped at SITEMAP_MAX_TEXT_BYTES.
+
+    The download stops at SITEMAP_MAX_BYTES, so a large .xml.gz can arrive
+    cut short. The entries in the part that did arrive are still good, and a
+    small file that unpacks to something huge is cut off rather than held.
+    """
+    try:
+        return zlib.decompressobj(16 + zlib.MAX_WBITS).decompress(body, SITEMAP_MAX_TEXT_BYTES)
+    except zlib.error:
+        return None
+
+
+def _sitemap_body(url, deadline):
+    """
+    (text, final url, root kind) for the sitemap at url, or None when it is
+    not one. The final url is where any redirect landed; the kind is
+    "urlset" or "sitemapindex".
+    """
+    if deadline - time.monotonic() <= 1:
+        return None
+    try:
+        r = get_within(url, deadline, SITEMAP_TIMEOUT_S, max_bytes=SITEMAP_MAX_BYTES)
+    except Exception:
+        return None
+    if r.status_code != 200 or not r.content:
+        return None
+    body = r.content
+    if body[:2] == b"\x1f\x8b":
+        body = _gunzip_prefix(body)
+        if not body:
+            return None
+    text = body.decode("utf-8", errors="replace")
+    # A missing sitemap often answers 200 with the site's own 404 page.
+    kind = _sitemap_root(text)
+    if kind is None:
+        return None
+    return text, (r.url or url), kind
+
+
+# What may come before a sitemap's root element: whitespace, the XML
+# declaration, stylesheet and other processing instructions, comments and a
+# doctype. A generator's comment can run to thousands of characters.
+_XML_PREAMBLE = re.compile(r"\s+|<\?[\s\S]*?\?>|<!--[\s\S]*?-->|<!DOCTYPE[^>]*>", re.I)
+_SITEMAP_ROOT = re.compile(r"<(?:\w+:)?(urlset|sitemapindex)\b", re.I)
+
+
+def _sitemap_root(text):
+    """"urlset" or "sitemapindex" for a sitemap's root element, or None for anything else."""
+    pos = 1 if text.startswith("\ufeff") else 0
+    while True:
+        m = _XML_PREAMBLE.match(text, pos)
+        if not m or m.end() == pos:
+            break
+        pos = m.end()
+    m = _SITEMAP_ROOT.match(text, pos)
+    return m.group(1).lower() if m else None
+
+
+def parse_sitemap(text, root=None):
+    """
+    ("index" | "urlset", [(loc, lastmod raw or None), ...]) for a sitemap's
+    text. `root` is the root element _sitemap_body() already found, when the
+    caller has it.
+    """
+    root = root if root is not None else _sitemap_root(text)
+    kind = "index" if root == "sitemapindex" else "urlset"
+    want = "sitemap" if kind == "index" else "url"
+    entries = []
+    for m in _SITEMAP_ENTRY_RE.finditer(text):
+        if m.group(1).lower() != want:
+            continue
+        loc = _SITEMAP_LOC_RE.search(m.group(2))
+        mod = _SITEMAP_MOD_RE.search(m.group(2))
+        if loc:
+            entries.append((html_unescape(loc.group(1).strip()), mod.group(1).strip() if mod else None))
+    return kind, entries
+
+
+# ISO 639-1 codes, so /ai, /us, /dc or /go, which are sections, are not read
+# as a language. /hr is Croatian, but appears more often as a human-resources
+# section, so it is left out.
+_LANGUAGE_CODES = frozenset("""
+ab aa af ak sq am ar an hy as av ae ay az bm ba eu be bn bi bs br bg my ca ch
+ce ny zh cv kw co cr cs da dv nl dz en eo et ee fo fj fi fr ff gl ka de el gn
+gu ht ha he hz hi ho hu ia ie ga ig ik io is it iu ja jv kl kn kr ks kk km ki
+rw ky kv kg ko ku kj la lb lg li ln lo lt lu lv gv mk mg ms ml mt mi mr mh mn
+na nv nd ne ng nb nn no ii nr oc oj cu om or os pa pi fa pl ps pt qu rm rn ro
+ru sa sc sd se sm sg sr gd sn si sk sl so st es su sw ss sv ta te tg th ti bo
+tk tl tn to tr ts tt tw ty ug uk ur uz ve vi vo wa cy wo fy xh yi yo za zu
+""".split())
+_LANGUAGE_ROOT = re.compile(r"^/([a-z]{2})(?:[-_][a-z]{2,4})?$", re.I)
+
+
+def _is_language_root(path):
+    m = _LANGUAGE_ROOT.match(path)
+    return bool(m) and m.group(1).lower() in _LANGUAGE_CODES
+
+
+def _path_prefix(url):
+    """The listed URL's path, or "" when it is the root of its site."""
+    path = (urlparse(url).path or "").rstrip("/")
+    # /index.html and its kin name the directory they sit in.
+    path = re.sub(r"/(?:index|default)\.\w+$", "", path, flags=re.I)
+    # /en or /pt-br is the site's homepage in one language, not a section of
+    # it: the sitemap often lists only the default language's pages.
+    return "" if _is_language_root(path) else path
+
+
+def _path_within(path, prefix):
+    """
+    True when a path sits at or under the listed path, case aside. A listed
+    path under a language root (/en/labs/civic) also takes entries under the
+    same path without it (/labs/civic), since a sitemap often lists only the
+    default language.
+    """
+    if not prefix:
+        return True
+    path = path.rstrip("/").lower()
+    prefixes = {prefix.lower()}
+    segments = [x for x in prefix.lower().split("/") if x]
+    if len(segments) > 1 and _is_language_root("/" + segments[0]):
+        prefixes.add("/" + "/".join(segments[1:]))
+    return any(path == p or path.startswith(p + "/") for p in prefixes)
+
+
+_TRACKING_PARAM = re.compile(r"^(?:utm_\w+|fbclid|gclid|mc_cid|mc_eid|ref|source)$", re.I)
+
+
+def _section_word(prefix):
+    """The first segment of a listing's path, after a language root: /en/labs/civic → labs."""
+    segments = [x for x in prefix.strip("/").lower().split("/") if x]
+    if len(segments) > 1 and _is_language_root("/" + segments[0]):
+        segments = segments[1:]
+    return segments[0] if segments else ""
+
+
+def _names_section(loc, section):
+    """
+    True when a child sitemap's address names the listing's section: as a
+    whole path segment, or as a whole word of its file name split on - _ and .
+    "lab" matches /lab/sitemap.xml and lab-sitemap.xml, not collaboration.xml.
+    """
+    if not section:
+        return False
+    segments = [x for x in (urlparse(loc).path or "").lower().split("/") if x]
+    if section in segments[:-1]:
+        return True
+    return bool(segments) and section in re.split(r"[-_.]", segments[-1])
+
+
+def _hash_route(p):
+    """True for a #/ or #!/ route: the page is built in the browser from it."""
+    return p.fragment.startswith(("/", "!/"))
+
+
+def _identifying_query(query):
+    """True when a query string picks out the page, not just tags the visit."""
+    return any(not _TRACKING_PARAM.match(k)
+               for k, _ in parse_qsl(query or "", keep_blank_values=True))
+
+
+def _site_host(url):
+    """A URL's host without a leading www or a default port, for telling one site from another."""
+    return _host_key(_netloc(url) or "")
+
+
+def _host_key(netloc):
+    """A netloc without a leading www or a default port, lower case."""
+    return re.sub(r":(?:80|443)$", "", netloc.lower()).removeprefix("www.")
+
+
+# Where a candidate date came from: the project's own evidence, or one of the
+# two last resorts.
+OWN, SITEMAP, WAYBACK = "own", "sitemap", "wayback"
+
+
+class Candidate(NamedTuple):
+    """One dated signal: its points, its date, how the breakdown names it, and where it came from."""
+    score: float
+    date: datetime
+    label: str
+    source: str
+
+    @property
+    def own(self):
+        """True for evidence the project left itself, not a sitemap's or the archive's."""
+        return self.source == OWN
+# A whole-site publish from the sitemap. Weighted and reported like WAYBACK.
+BUILD = "build"
+
+
+SITEMAP_PASS_GAP_S = 120   # stamps this close are one generator pass
+SITEMAP_PASS_MAX_S = 1800  # and one pass spans no more than half an hour
+
+
+def _stamp_time(mod):
+    """
+    A lastmod's time to the second in UTC, or None for a bare date. An offset
+    such as +02:00 is applied, so stamps one run wrote in different zones line
+    up; a time with no offset is taken as UTC.
+    """
+    m = re.search(r"(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2})(?::(\d{2}))?(?:\.\d+)?"
+                  r"\s*(Z|[+-]\d{2}:?\d{2})?", mod)
+    if not m:
+        return None
+    try:
+        t = datetime.strptime("%s %s:%s" % (m.group(1), m.group(2), m.group(3) or "00"),
+                              "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+    tz = m.group(4)
+    if tz and tz != "Z":
+        sign = 1 if tz[0] == "+" else -1
+        digits = tz[1:].replace(":", "")
+        t -= sign * timedelta(hours=int(digits[:2]), minutes=int(digits[2:]))
+    return t
+
+
+_MIDNIGHT = re.compile(r"T00:00(?::00(?:\.0+)?)?\s*(?:Z|[+-]\d{2}:?\d{2})?\s*$", re.I)
+
+
+def _build_passes(mods):
+    """
+    One key per lastmod, shared by the stamps one generator pass wrote: ("d",
+    day) for a bare date, ("p", n) for a time. Times join a pass while each
+    falls within SITEMAP_PASS_GAP_S of the one before, in UTC, so a pass that
+    takes minutes to write a large site, or runs across midnight, is still one.
+    A pass ends after SITEMAP_PASS_MAX_S, so a day of steady hand edits a
+    minute or two apart is not one long pass.
+    """
+    keys = [None] * len(mods)
+    timed = []
+    for i, mod in enumerate(mods):
+        # A time of exactly midnight, with any offset, is a date written as a
+        # timestamp: as coarse as a bare date, and judged like one.
+        t = _stamp_time(mod)
+        if t is not None and _MIDNIGHT.search(mod):
+            # Its day in UTC, the same day _lastmod_date gives it.
+            keys[i] = ("d", t.date().isoformat())
+        elif t is None:
+            m = re.search(r"\d{4}-\d{2}-\d{2}", mod)
+            keys[i] = ("d", m.group(0) if m else mod.strip())
+        else:
+            timed.append((t, i))
+    timed.sort()
+    n, prev, first = -1, None, None
+    for t, i in timed:
+        if (prev is None or (t - prev).total_seconds() > SITEMAP_PASS_GAP_S
+                or (t - first).total_seconds() > SITEMAP_PASS_MAX_S):
+            n += 1
+            first = t
+        keys[i] = ("p", n)
+        prev = t
+    return keys
+
+
+# Pages a CMS creates on install. A date on one says somebody installed the
+# site, or touched a page they never replaced, not that the project is kept up.
+_CMS_DEFAULT_PAGE = re.compile(
+    r"/(?:sample-page|hello-world|hello-world-\d+|uncategorized|category/uncategorized|"
+    r"author/admin|blank|blank-\d+|new-page|new-page-\d+|untitled|untitled-\d+|"
+    r"blog/hello-world|blog/welcome-to-your-blog|welcome-to-your-blog|"
+    r"blog/first-blog-post|example-page|test-page)/?$", re.I)
+
+# A large site restamped in one day is a regeneration even when the stamps
+# spread across the day and fall short of SITEMAP_BUILD_SHARE: a community
+# platform writing 4,577 entries on one day is the platform, not its members.
+SITEMAP_BIG_DAY_MIN   = 1000
+SITEMAP_BIG_DAY_SHARE = 0.5
+
+
+def _lastmod_date(mod, now):
+    """
+    A lastmod as the day it names, at midnight UTC, or None. Sitemaps write
+    ISO 8601, so that is read directly; only an odd shape goes to the loose
+    parser, which costs far more per entry on a file of tens of thousands.
+    """
+    raw = mod.strip()
+    d = None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        # The day in UTC, the same as _stamp_time, so a stamp late in the
+        # evening west of Greenwich dates the next day there too.
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(timezone.utc)
+        d = parsed.date()
+    except ValueError:
+        m = re.match(r"(\d{4})-(\d{2})-(\d{2})", raw)
+        if m:
+            try:
+                d = datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+            except ValueError:
+                d = None
+    if d is None:
+        return _parse_date_loose(mod, now)
+    dt = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    if dt > now + timedelta(days=1) or dt.year < 2000:
+        return None
+    return dt
+
+
+def sitemap_newest_entry(entries, now, prefix="", hosts=None, builds=None, deadline=None):
+    """
+    (date, source) for the newest believable lastmod among a sitemap's entries,
+    or None. Entries are (loc, lastmod) or (loc, lastmod, source), where
+    source is the sitemap file the entry came from.
+
+    Only entries at or under `prefix` count, so a listing that points deep into
+    a large site is dated by its own section rather than by the whole site. And
+    only entries on `hosts`: a robots.txt can name a sitemap of another site
+    entirely, and that site's changes say nothing about this one.
+
+    A deploy that regenerates the site restamps every generated page with the
+    day of the build. When one pass carries SITEMAP_BUILD_SHARE of the entries,
+    that pass is set aside, and the entries left over, usually the pages
+    somebody edited by hand, date the site. Each pass set aside is added to
+    `builds` as (date, source). Parsing stops at `deadline` (time.monotonic()),
+    and what was read by then is judged.
+    """
+    # Build passes are judged on every entry on the site, then the listing's
+    # section is picked out: a regeneration stamps the whole file, and a
+    # section of a few pages would otherwise slip under every threshold.
+    kept = []
+    for n, entry in enumerate(entries):
+        if deadline is not None and n % 500 == 0 and time.monotonic() >= deadline:
+            break
+        loc, mod = entry[0], entry[1]
+        src = entry[2] if len(entry) > 2 else None
+        if not mod:
+            continue
+        try:
+            parts = urlparse(loc)
+        except ValueError:
+            continue
+        if hosts and _host_key(parts.netloc) not in hosts:
+            continue
+        path = parts.path or ""
+        if _CMS_DEFAULT_PAGE.search(path):
+            continue
+        dt = _lastmod_date(mod, now)
+        if dt is not None:
+            kept.append((dt, mod, src, _path_within(path, prefix)))
+    if not any(ins for _, _, _, ins in kept):
+        return None
+    raws = _build_passes([m for _, m, _, _ in kept])
+    # The server's clock, not a change: dropped before anything else is
+    # judged, so one such entry cannot make a real build look old.
+    dated = [(dt, key, src, ins) for (dt, _, src, ins), key in zip(kept, raws)
+             if (now - dt).days >= LAST_MODIFIED_MIN_AGE_DAYS]
+
+    def set_aside(keep):
+        """Drop the entries keep() rejects, noting the newest in-section one as a build."""
+        nonlocal dated
+        gone = [(d, s) for d, k, s, ins in dated if ins and not keep(d, k)]
+        if builds is not None and gone:
+            builds.append(max(gone, key=lambda g: g[0]))
+        dated = [x for x in dated if keep(x[0], x[1])]
+
+    # A generator that writes one stamp on every entry, a date or a time, says
+    # when the file was built, not when anything changed. Below five entries
+    # one sitting of edits can look the same, so it is believed.
+    def enough(key, n):
+        """Enough entries to call a shared stamp a build: more for a bare date."""
+        return n >= (SITEMAP_DAY_STAMP_MIN_COUNT if key[0] == "d" else SITEMAP_STAMP_MIN_COUNT)
+
+    if len(set(raws)) == 1 and enough(raws[0], len(raws)):
+        set_aside(lambda d, k: False)
+        return None
+    # Pages edited by hand are not stamped minutes apart in one run. When one
+    # pass covers SITEMAP_BUILD_SHARE of the entries, a generator wrote them,
+    # so they are set aside even when the pass is the newest thing in the
+    # file, and the rest date the site. A bare date shared that widely is the
+    # same thing at a coarser grain: a generator that writes only the day.
+    if dated:
+        stamp, count = Counter(k for _, k, _, _ in dated).most_common(1)[0]
+        if enough(stamp, count) and count >= SITEMAP_BUILD_SHARE * len(dated):
+            set_aside(lambda d, k: k != stamp)
+    if len(dated) >= SITEMAP_BIG_DAY_MIN:
+        day, count = Counter(d.date() for d, _, _, _ in dated).most_common(1)[0]
+        if count >= SITEMAP_BIG_DAY_MIN and count >= SITEMAP_BIG_DAY_SHARE * len(dated):
+            set_aside(lambda d, k: d.date() != day)
+    mine = [(d, s) for d, _, s, ins in dated if ins]
+    if not mine:
+        return None
+    return max(mine, key=lambda x: x[0])
+
+
+def _robots_sitemaps(root, deadline):
+    """The sitemap urls robots.txt names, at most three."""
+    if deadline - time.monotonic() <= 1:
+        return []
+    try:
+        r = get_within(root + "/robots.txt", deadline, SITEMAP_TIMEOUT_S)
+    except Exception:
+        return []
+    if r.status_code != 200:
+        return []
+    found = re.findall(r"(?im)^\s*sitemap\s*:\s*(\S+)", r.text[:200_000])
+    return [u for u in found if u.lower().startswith(("http://", "https://"))][:3]
+
+
+def sitemap_date(url, now, deadline=None, landed=None):
+    """
+    SitemapFind(date, sitemap url, build) for the newest believable change a
+    site's sitemap lists for the listed address, or None. `deadline` is a
+    time.monotonic() value the search stops at, on top of SITEMAP_DEADLINE_S.
+    `landed` is where the listed homepage moved on a trusted move, as
+    score_project() works it out once; without it, landed_url() is asked.
+
+    Sitemaps named in robots.txt come first, then the usual addresses. The first
+    one that yields a date is the one used: a site that publishes several
+    usually publishes the same list under each name. One that yields nothing,
+    such as another site's sitemap named in robots.txt, does not end the search.
+
+    Entries count when they are on the listed host or on a host the site
+    redirects to, since a site that moved to a new name or to www lists its
+    pages under the name it moved to.
+    """
+    p = urlparse(url)
+    if not p.netloc:
+        return None
+    # A page named by its query or by a #/ route shares its path with every
+    # other page of that kind, so no sitemap entry can be told to be this one.
+    if _identifying_query(p.query) or _hash_route(p):
+        return None
+    hosts = {_site_host(url)}
+    # The listed address decides which section of the site counts, unless its
+    # homepage moved to another host on a trusted move (landed_url): then the
+    # site is the new one, and the section is where it landed. Where robots.txt
+    # redirects is not trusted: a parked or hijacked robots.txt can land anywhere.
+    landed = landed if landed is not None else landed_url(url)
+    if landed != url:
+        lp = urlparse(landed)
+        # The page the site moved to has to be one the sitemap can find too.
+        if _identifying_query(lp.query) or _hash_route(lp):
+            return None
+        hosts.add(_site_host(landed))
+        p = lp
+
+    # One rule for the section: a listed front page is the whole site, on
+    # whatever host it landed; a listed deeper page is the section it landed
+    # in, which is its own path when it did not move.
+    prefix = "" if _path_prefix(url) == "" else _path_prefix(landed)
+    root = "%s://%s" % (p.scheme or "https", p.netloc)
+    deadline = min(time.monotonic() + SITEMAP_DEADLINE_S,
+                   deadline if deadline is not None else float("inf"))
+    if deadline - time.monotonic() <= 1:
+        return None
+    # A name lookup is outside every request timeout, so it gets its own limit.
+    # A host the homepage fetch already reached has resolved.
+    reached = {urlparse(u).hostname for pair in _PAGE_FINAL.items() for u in pair}
+    if (p.hostname not in reached
+            and host_resolves(root, timeout=min(SITEMAP_TIMEOUT_S, deadline - time.monotonic() - 1))
+            is not True):
+        _log("    sitemap  → the site's name did not resolve in time")
+        return None
+    fetches = 1
+    tops = _robots_sitemaps(root, deadline)
+    tops += [root + s for s in SITEMAP_PATHS if root + s not in tops]
+
+    # Final addresses already read, so one index reached under two names, such
+    # as /sitemap.xml redirecting to /sitemap_index.xml, is read once.
+    visited = set()
+    section = _section_word(prefix)
+    for top in tops:
+        if fetches >= SITEMAP_MAX_FETCHES:
+            break
+        if top in visited:
+            continue
+        fetches += 1
+        got = _sitemap_body(top, deadline)
+        if got is None:
+            continue
+        text, final, root_kind = got
+        if final in visited:
+            continue
+        visited.update((top, final))
+        # Where the site's own sitemap address redirected is the site too, when
+        # it stays within the same registered domain and trusted_move accepts
+        # it from the sitemap's address: the same host, www or not, or the
+        # apex's own subdomain from a front-page listing. Never a sibling: the
+        # project's name on the homepage says nothing about the sibling's
+        # list. Never up to a parent host. The page it
+        # landed on, not the homepage, is checked for parking. A sitemap
+        # robots.txt names on some other host does not make that host this site.
+        if (_site_host(top) in hosts
+                and _registrable(_site_host(final)) == _registrable(_site_host(top))
+                and trusted_move(url, final, check_parked=False, start=top)
+                and not _looks_parked(url, final, html=text)):
+            hosts.add(_site_host(final))
+        # Every entry under one top sitemap is judged together, so a generator
+        # pass split across many small child files is still one pass.
+        gathered = []
+        queue = [(final, text, root_kind, 0)]
+        while queue:
+            src, body, body_kind, depth = queue.pop(0)
+            kind, entries = parse_sitemap(body, body_kind)
+            # Some sitemaps list paths rather than full addresses.
+            entries = [(urljoin(src, loc), mod) for loc, mod in entries]
+            if kind == "urlset":
+                gathered.extend((loc, mod, src) for loc, mod in entries)
+                continue
+            if depth >= SITEMAP_MAX_DEPTH:
+                continue
+            # Children named for the listing's section first, so a lab's page on
+            # a university site reads the lab's sitemap, then the newest-stamped.
+            children = sorted(
+                (e for e in entries if e[0] not in visited),
+                key=lambda e: (_names_section(e[0], section), e[1] or ""),
+                reverse=True)
+            for loc, _ in children[:SITEMAP_CHILDREN]:
+                if fetches >= SITEMAP_MAX_FETCHES:
+                    break
+                fetches += 1
+                child = _sitemap_body(loc, deadline)
+                if child is not None and child[1] not in visited:
+                    visited.update((loc, child[1]))
+                    queue.append((child[1], child[0], child[2], depth + 1))
+        builds = []
+        newest = sitemap_newest_entry(gathered, now, prefix, hosts, builds, deadline=deadline)
+        found = SitemapFind(newest[0], newest[1] or final) if newest else None
+        # A top sitemap that dated anything is the site's list. The other
+        # names usually serve the same list again, so the search ends here,
+        # and an old date is left for the archive to improve on.
+        searched_enough = found is not None or bool(builds)
+        recent_build = None
+        if builds:
+            bdt, bsrc = max(builds, key=lambda b: b[0])
+            if (now - bdt).days <= WAYBACK_RECENT_CHANGE_DAYS:
+                recent_build = SitemapFind(bdt, bsrc or final, build=True)
+        if found and (now - found.date).days <= SITEMAP_MAX_AGE_DAYS:
+            # A page date 13 to 18 months old scores below a recent publish,
+            # so the publish is the better evidence then.
+            if (recent_build is not None and wayback_recency_score(recent_build.date, now)
+                    > page_recency_score(found.date, now)):
+                return recent_build._replace(page_date=found.date)
+            # Reported as the file that carried the date, for the breakdown.
+            return found
+        # A recent publish of the whole site is weaker than a recent page date,
+        # and stronger than nothing.
+        if recent_build is not None:
+            return recent_build
+        if searched_enough:
+            return None
+    return None
+
+
+# ── What the Wayback Machine saw change ───────────────────────────────────────
+#
+# The Internet Archive keeps a hash of every capture it makes. When the hash of
+# a page changes, its content changed, so the first capture of the current hash
+# dates the last change the archive saw. The archive also reaches sites that
+# turn this checker away at a bot wall, which is why it is asked at all.
+#
+# It is weak evidence, weighted like the footer copyright. Many pages change
+# their hash on every capture, from a rotating banner, a token in a form or a
+# clock in the header, and their "last change" is then only the last capture.
+# Those are detected and ignored: when most recent captures each carry a hash
+# of their own, the hash measures the page's churn rather than its content.
+#
+# The archive limits clients to roughly 15 requests a minute, so requests are
+# spaced, and a refusal or a stall pauses the archive for the rest of the run
+# rather than costing every later record a timeout.
+
+WAYBACK_CDX           = "https://web.archive.org/cdx/search/cdx"
+WAYBACK_TIMEOUT_S     = 10
+WAYBACK_MIN_CAPTURES  = 4       # distinct days with a real capture, before the hashes mean anything
+WAYBACK_TIMEOUTS_TO_PAUSE = 2
+WAYBACK_PAUSE_MIN_TIMEOUT_S = 5   # a timeout shorter than this does not count toward the pause
+WAYBACK_MAX_CHURN     = 0.5     # share of captures with a new hash that means churn
+WAYBACK_MIN_LENGTH    = 400     # record bytes; smaller 200s are bot checks and stubs
+WAYBACK_RECENT_CHANGE_DAYS  = 365
+WAYBACK_LOOKBACK_DAYS       = 400   # captures asked for: the year, and a little before it
+WAYBACK_FALLBACK_DAYS       = 60    # asked for when the archive gives up on the full query
+WAYBACK_MIN_INTERVAL_S = 4
+WAYBACK_PAUSE_S       = 600
+WAYBACK_LABEL         = "Last content change seen by the Wayback Machine"
+
+_wayback_last_call   = 0.0
+_wayback_paused_till = 0.0
+_wayback_timeouts    = 0
+
+
+def _note_wayback_failure(why):
+    """
+    One failed search that had a fair chance. One is the archive being slow;
+    WAYBACK_TIMEOUTS_TO_PAUSE in a row is the archive struggling, and every
+    later record would wait on it too, so it is left alone for a while.
+    """
+    global _wayback_timeouts, _wayback_paused_till
+    _wayback_timeouts += 1
+    if _wayback_timeouts >= WAYBACK_TIMEOUTS_TO_PAUSE:
+        _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
+        _wayback_timeouts = 0
+        _log(f"    wayback  → {why}, twice in a row; not asked again for a while")
+    else:
+        _log(f"    wayback  → {why}")
+
+
+def _wayback_get(url, params=None, deadline=None, count_failure=True):
+    """
+    One request to the archive, spaced and paused as the archive asks, or None
+    when it could not be asked or refused.
+
+    A CDX query (with params) that fails or meets a server error pauses the
+    archive, since every later record would meet the same. An archived page
+    read (no params) goes through get_limited, for its byte cap and deadline,
+    and a failure or server error on it only skips that capture: one bad
+    capture says nothing about the archive. A 429 pauses either way.
+
+    Both go through get_limited, with the same caps. Given a deadline, the
+    request is not started unless the spacing and a two-second request fit,
+    and its timeouts are cut to fit what is left.
+
+    Only a failure the archive earned counts toward the pause: a request that
+    had at least WAYBACK_PAUSE_MIN_TIMEOUT_S and still got no answer, or a
+    server error, on a query the caller does not mean to retry
+    (count_failure). A timeout cut shorter than that to fit a deadline says
+    nothing about the archive. A 429 pauses whatever the query.
+    """
+    page = params is None
+    global _wayback_last_call, _wayback_paused_till
+    now = time.monotonic()
+    if now < _wayback_paused_till:
+        return None
+    wait = max(_wayback_last_call + WAYBACK_MIN_INTERVAL_S - now, 0)
+    # A search gets at least WAYBACK_PAUSE_MIN_TIMEOUT_S, so it is started only
+    # when that timeout's worst case (three of them and the shortest body
+    # deadline) still fits before the deadline. A page read needs a couple of
+    # seconds. Either way a skipped request does not count as a failure.
+    least = 2 if page else 3 * WAYBACK_PAUSE_MIN_TIMEOUT_S + 0.5
+    if deadline is not None and deadline - now - wait < least:
+        return None
+    if wait > 0:
+        time.sleep(wait)
+    _wayback_last_call = time.monotonic()
+    remaining = None if deadline is None else deadline - time.monotonic()
+    timeout = WAYBACK_TIMEOUT_S if remaining is None else request_caps(remaining, WAYBACK_TIMEOUT_S)
+    if not page:
+        # A search gets at least WAYBACK_PAUSE_MIN_TIMEOUT_S, so an archive that
+        # is down is seen to be down even late in a listing's time.
+        timeout = max(timeout, WAYBACK_PAUSE_MIN_TIMEOUT_S)
+    # A failure counts toward the pause only when the request had a fair
+    # chance: a timeout of at least WAYBACK_PAUSE_MIN_TIMEOUT_S.
+    full_timeout = timeout >= WAYBACK_PAUSE_MIN_TIMEOUT_S
+    if params:
+        # doseq, so a list of filters goes out as one filter= each.
+        url = url + "?" + urlencode(params, doseq=True)
+    try:
+        r = get_within(url, deadline, WAYBACK_TIMEOUT_S, timeout=timeout)
+    except Exception:
+        if not page and count_failure and full_timeout:
+            _note_wayback_failure("no answer")
+        return None
+    if page and r.status_code != 429:
+        return r if r.status_code == 200 else None
+    if r.status_code >= 500:
+        # A server error counts once toward the pause, like a request that got
+        # no answer; it takes two in a row.
+        if count_failure and full_timeout:
+            _note_wayback_failure("server error %d" % r.status_code)
+        return None
+    global _wayback_timeouts
+    _wayback_timeouts = 0
+    if r.status_code == 429:
+        _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
+        _log(f"    wayback  → refused ({r.status_code}); not asked again for a while")
+        return None
+    if r.status_code != 200:
+        return None
+    return r
+
+
+def _cdx(params, deadline=None, count_failure=True):
+    """Rows from the CDX API, or None when the archive could not be asked."""
+    r = _wayback_get(WAYBACK_CDX, dict(params, output="json"), deadline, count_failure)
+    if r is None:
+        return None
+    # No captures comes back as "[]". An empty body is the archive giving up on
+    # a query too heavy for it, which says nothing about the page.
+    if not r.text.strip():
+        _log("    wayback  → the archive returned nothing for that query")
+        return None
+    try:
+        rows = json.loads(r.text)
+    except ValueError:
+        return None
+    if not isinstance(rows, list):
+        return None
+    return [row for row in rows[1:] if isinstance(row, list) and len(row) >= 2]
+
+
+def _cdx_time(ts):
+    try:
+        return datetime.strptime(str(ts)[:14], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def wayback_change_from_captures(rows, now=None):
+    """
+    The first capture of the newest content, from (timestamp, digest) rows in
+    time order, as (datetime | None, settled, reason). settled is False when
+    the newest content already held at the start of the rows, so its first
+    capture is earlier than anything here, and the rows can only bound it.
+
+    reason is None when the rows date a change, else why not:
+      "few"        fewer than two usable rows
+      "noise"      the hash changes on most captures, or flips back to an
+                   earlier one, so only the text can date a change. 48 of 60
+                   sampled undated listings looked like this in November 2026,
+                   from form tokens, rotating banners or alternating versions
+      "stale"      given `now`, the capture before the change is older than
+                   WAYBACK_RECENT_CHANGE_DAYS, so the change could have come
+                   at any point after it
+      "unsettled"  unchanged across the rows (the date is the first row's)
+    """
+    rows = [r for r in rows if _cdx_time(r[0]) is not None]
+    if len(rows) < 2:
+        return None, True, "few"
+    digests = [r[1] for r in rows]
+    changes = sum(1 for a, b in zip(digests, digests[1:]) if a != b)
+    if changes / (len(rows) - 1) > WAYBACK_MAX_CHURN:
+        return None, True, "noise"
+    newest = digests[-1]
+    i = len(rows) - 1
+    while i > 0 and digests[i - 1] == newest:
+        i -= 1
+    # The current content also showing up earlier, apart from its own run, is
+    # a page flipping between versions rather than one that changed.
+    if newest in digests[:i]:
+        return None, True, "noise"
+    if (now is not None and i > 0
+            and (now - _cdx_time(rows[i - 1][0])).days > WAYBACK_RECENT_CHANGE_DAYS):
+        return None, True, "stale"
+    if i == 0:
+        return _cdx_time(rows[0][0]), False, "unsettled"
+    return _cdx_time(rows[i][0]), True, None
+
+
+def _real_capture(row):
+    """
+    False for a row that is not a capture of the page. Rows are (timestamp,
+    digest, length, statuscode, mimetype), any of the last three possibly
+    missing. A revisit (status "-") is the archive seeing the same content
+    again and keeps its digest, so it counts. A 200 that is not HTML, or
+    whose compressed record is tiny, is a bot check or a stub. length is the
+    size of the archived record, not of the page, so only a very small one is
+    dropped: a plain page like info.cern.ch stores about 800 bytes.
+    """
+    status = row[3] if len(row) > 3 else "200"
+    mime = (row[4] if len(row) > 4 else "text/html") or ""
+    if status == "-":
+        return True
+    if status != "200" or (mime and mime not in ("text/html", "application/xhtml+xml", "warc/revisit")):
+        return False
+    try:
+        return int(row[2]) >= WAYBACK_MIN_LENGTH
+    except (IndexError, ValueError, TypeError):
+        return True
+
+
+WAYBACK_TEXT_MIN_WORDS      = 10  # distinct words that must differ to call it a change
+WAYBACK_TEXT_MIN_PAGE_WORDS = 30  # a capture with fewer is a stub, not the page
+WAYBACK_TEXT_FETCHES        = 5   # archived pages read per listing, at most
+
+
+def _archived_words(ts, target, deadline=None):
+    """
+    The distinct words of the page as the archive captured it at ts, or None
+    when the capture cannot be read or is a bot check. Words only, with no
+    digits, so a date or a counter in the page is not a change.
+    """
+    r = _wayback_get("https://web.archive.org/web/%sid_/http://%s" % (ts, target), None, deadline)
+    if r is None:
+        return None
+    text = readable_page(r.text or "")["text"]
+    if looks_like_bot_wall(text):
+        return None
+    words = set(re.findall(r"[^\W\d_]{3,}", text.lower()))
+    return words if len(words) >= WAYBACK_TEXT_MIN_PAGE_WORDS else None
+
+
+def _text_differs(a, b):
+    return len(a ^ b) >= WAYBACK_TEXT_MIN_WORDS
+
+
+def _archive_time_left(deadline):
+    """
+    False once there is not time for one more archive request: the spacing
+    the archive asks for plus a two-second request, whose timeouts
+    _wayback_get cuts to fit. No deadline, no limit.
+    """
+    if deadline is None:
+        return True
+    return deadline - time.monotonic() > WAYBACK_MIN_INTERVAL_S + 2
+
+
+def wayback_text_change(rows, target, now, deadline=None):
+    """
+    When the page's text last changed within the year, read from the archived
+    pages themselves, or None.
+
+    At most WAYBACK_TEXT_FETCHES (five) archived pages are read, four seconds
+    apart: the newest capture and the one before it, which must agree, so the
+    current text is settled; the capture nearest six months back, and the one
+    nearest a year back if the six-month one still reads the same; and the
+    capture beside the one that differs, which must agree with it, so the
+    earlier text held. The current text must also differ from every earlier
+    text read, so a page alternating between two versions dates nothing, and
+    so does a carousel or feed that rewrites part of the page on every capture.
+
+    The date returned is the first capture after the last one read with the
+    earlier text. No read pins the change closer than that, so the date is the
+    earliest the current text can have appeared, and the change can be later.
+    """
+    recent = [r for r in rows if _cdx_time(r[0]) is not None
+              and (now - _cdx_time(r[0])).days <= WAYBACK_RECENT_CHANGE_DAYS]
+    if len(recent) < 4:
+        return None
+    reads, seen = [0], {}
+
+    def read(i):
+        if i in seen:
+            return seen[i]
+        if reads[0] >= WAYBACK_TEXT_FETCHES:
+            _log("    wayback  → read limit reached before the text could be dated")
+            return None
+        if not _archive_time_left(deadline):
+            _log("    wayback  → no time left to read the archived page")
+            return None
+        reads[0] += 1
+        seen[i] = _archived_words(recent[i][0], target, deadline=deadline)
+        if seen[i] is None:
+            _log(f"    wayback  → the capture of {recent[i][0][:8]} could not be read")
+        return seen[i]
+
+    def nearest(days, below):
+        """Index of the capture nearest `days` ago, older than index `below`."""
+        return min(range(below),
+                   key=lambda k: abs((now - _cdx_time(recent[k][0])).days - days))
+
+    newest = len(recent) - 1
+    current = read(newest)
+    if current is None:
+        return None
+    settled = read(newest - 1)
+    if settled is None:
+        return None
+    if _text_differs(settled, current):
+        _log("    wayback  → the newest text is not settled yet; not dated")
+        return None
+    diff = None
+    tried = set()
+    for days in (182, WAYBACK_RECENT_CHANGE_DAYS):
+        k = nearest(days, newest - 1)
+        if k in tried:
+            continue
+        tried.add(k)
+        words = read(k)
+        if words is None:
+            # An unreadable six-month capture leaves the year-old one to try.
+            continue
+        if _text_differs(words, current):
+            diff, diff_words = k, words
+            break
+    if diff is None:
+        return None
+    # The earlier text has to have held for two captures: the one before the
+    # differing capture, or, at the start of the year, the one after it.
+    partner = diff - 1 if diff > 0 else (diff + 1 if diff + 1 < newest - 1 else None)
+    if partner is None:
+        _log("    wayback  → no second capture of the earlier text within the year")
+        return None
+    partner_words = read(partner)
+    if partner_words is None:
+        return None
+    if _text_differs(partner_words, diff_words):
+        _log("    wayback  → the page's text changes on every capture; not dated")
+        return None
+    # Every earlier text read must differ from the current one: a page that
+    # goes back to an earlier version is alternating, not changing.
+    if any(not _text_differs(w, current) for k, w in seen.items() if k <= max(diff, partner) and w):
+        _log("    wayback  → the page returns to an earlier text; not dated")
+        return None
+    last_old = max(diff, partner)
+    return _cdx_time(recent[last_old + 1][0])
+
+
+def wayback_change_date(url, now=None, deadline=None, landed=None):
+    """
+    When the Wayback Machine last saw the page at url change, or None.
+    `deadline` is a time.monotonic() value no archive request starts after.
+
+    Only a change within WAYBACK_RECENT_CHANGE_DAYS is returned. The archive
+    is evidence that somebody is keeping a page up, and too weak to be the
+    evidence that somebody has stopped: an old change date would push a
+    listing down on the strength of when the archive happened to look.
+    """
+    now = now or datetime.now(timezone.utc)
+    if _hash_route(urlparse(url)):
+        # A #/ route is built in the browser, so every capture is the same shell.
+        return None
+    # The page the site now serves, where the listed address redirects to it.
+    landed = landed if landed is not None else landed_url(url)
+    p = urlparse(landed)
+    if not p.netloc or _hash_route(p):
+        return None
+    target = p.netloc + (p.path or "/")
+    if _identifying_query(p.query):
+        target += "?" + p.query
+    if not _archive_time_left(deadline):
+        _log("    wayback  → no time left for this listing")
+        return None
+    # Revisits (status "-") are kept: they say the content had not changed.
+    base = {"url": target, "fl": "timestamp,digest,length,statuscode,mimetype",
+            # Only real captures of the page and revisits of one, so the
+            # one-a-day collapse keeps the first real capture of each day.
+            "filter": ["statuscode:(200|-)",
+                       "mimetype:(text/html|application/xhtml\\+xml|warc/revisit)"]}
+    # One capture a day over the last WAYBACK_LOOKBACK_DAYS, so a page captured
+    # many times a day still has captures six months and a year back in reach.
+    since = (now - timedelta(days=WAYBACK_LOOKBACK_DAYS)).strftime("%Y%m%d")
+    query = dict(base, fastLatest="true", collapse="timestamp:8", **{"from": since})
+    # The year-long query failing does not count toward the pause: the shorter
+    # one below is still to be asked.
+    rows = _cdx(dict(query, limit=-(WAYBACK_LOOKBACK_DAYS + 10)), deadline=deadline,
+                count_failure=False)
+    if rows is None and time.monotonic() >= _wayback_paused_till:
+        # A heavily archived page can make the year-long query time out inside
+        # the archive. The latest WAYBACK_FALLBACK_DAYS days still date a
+        # recent change, though a capture a year back is then out of reach.
+        rows = _cdx(dict(query, limit=-WAYBACK_FALLBACK_DAYS), deadline=deadline)
+        # Sixty days cannot show a capture six months or a year back, so the
+        # text comparison, which needs them, is not tried on these rows.
+        short_window = True
+    else:
+        short_window = False
+    if not rows:
+        return None
+    # Every day of the window is kept, so the six-month and one-year captures
+    # and the hash check see the whole year, not only the last few weeks.
+    rows = sorted((r for r in rows if _real_capture(r)), key=lambda r: r[0])
+    # The query asks for one capture a day, so the count is of distinct days.
+    if len({r[0][:8] for r in rows}) < WAYBACK_MIN_CAPTURES:
+        _log("    wayback  → too few captures of the page to judge")
+        return None
+    dt, settled, reason = wayback_change_from_captures(rows, now)
+    # The text is compared only on a homepage. A deep page on an institution's
+    # site carries the institution's news box, so its text changes with the
+    # host's news, not with the listing. Deep pages keep to the hashes.
+    # Both the listed address and the page actually read have to be a homepage:
+    # a homepage that redirects into a deep page reads that page's news box.
+    def is_home(u):
+        return _path_prefix(u) == "" and not _identifying_query(urlparse(u).query)
+    homepage = is_home(url) and is_home(landed)
+    if reason == "noise" and homepage and not short_window:
+        dt = wayback_text_change(rows, target, now, deadline)
+        if dt is None:
+            _log("    wayback  → the page's text did not change within the year, "
+                 "or could not be read")
+            return None
+        _log(f"    wayback  → text changed; current text first captured {dt:%Y-%m-%d}")
+        return reject_future(dt)
+    if dt is None:
+        _log({"few": "    wayback  → too few captures",
+              "noise": "    wayback  → the hash changes on most captures, and a deep "
+                       "page's text is not compared",
+              "stale": "    wayback  → the archive did not look for a year before "
+                       "the change"}.get(reason, "    wayback  → no date"))
+        return None
+    if not settled:
+        # Unchanged across the whole window: the change is somewhere before
+        # it, which is only a bound, and an old one at that.
+        _log("    wayback  → no change in the recent captures")
+        return None
+    if (now - dt).days > WAYBACK_RECENT_CHANGE_DAYS:
+        _log(f"    wayback  → last change {dt:%Y-%m-%d}, too old to count")
+        return None
+    return reject_future(dt)
+
+
+def wayback_recency_score(dt, now):
+    """
+    45 for a change the Wayback Machine saw within the last year, else 0.
+
+    45 is the footer copyright's floor: a page seen to change this year is a
+    page somebody is keeping up, and no more than that. It never counts toward
+    the website bonus, so a live site with a social account tops out in Likely
+    Active on this evidence alone.
+    """
+    if dt is None or (now - dt).days > WAYBACK_RECENT_CHANGE_DAYS:
+        return 0
+    return COPYRIGHT_FRESH_FLOOR
+
+
 def footer_copyright_year(html):
     """
     The newest year in a copyright line in the footer, or None.
@@ -2084,9 +3389,6 @@ def website_alive_bonus(best_date, now):
     return WEBSITE_ALIVE_BONUS_STALE
 
 
-# Where "a while ago" stops meaning likely active. A project silent for longer
-# than this has to clear Possibly Inactive on other evidence.
-STALE_AFTER_DAYS = 548   # eighteen months
 
 
 def recency_base_score(dt, now):
@@ -2178,14 +3480,26 @@ def _without_unparseable_urls(project):
     return replace(project, website=website, repo=repo, feeds=feeds, links=links)
 
 
-def score_project(project):
+LAST_RESORTS_S = 40   # sitemap and archive together, when the caller sets no budget
+SITEMAP_SHARE_S = 15  # the sitemap's part of it at most; the archive keeps the rest
+
+
+def score_project(project, budget_s=None):
     """
     Runs all signal checks and returns:
       score (float), last_activity_date (ISO str | None), status (str)
+
+    budget_s, when given, is how many seconds the caller allows this project
+    from now. The sitemap and the archive, which run last, stop asking once it
+    has passed. Without it they share LAST_RESORTS_S between them, on top of
+    their own caps (SITEMAP_DEADLINE_S, and
+    WAYBACK_TEXT_FETCHES archive reads at WAYBACK_MIN_INTERVAL_S apart).
     """
+    deadline = None if budget_s is None else time.monotonic() + budget_s
     name   = project.name
     now    = datetime.now(timezone.utc)
     _PAGE_CACHE.clear()
+    _PAGE_FINAL.clear()
 
     _log(f"\n  [{name}]")
     website_unreadable = bool(project.website) and not _parses(project.website)
@@ -2268,10 +3582,10 @@ def score_project(project):
     if website_url and url_class == "homepage":
         discovered_social = discover_social_links(website_url)
         if discovered_social:
-            existing_domains = {(_netloc(u) or "").removeprefix("www.") for u in all_social_urls}
+            existing_domains = {_site_host(u) for u in all_social_urls}
             added = []
             for su in discovered_social:
-                domain = (_netloc(su) or "").removeprefix("www.")
+                domain = _site_host(su)
                 if domain not in existing_domains:
                     all_social_urls.append(su)
                     existing_domains.add(domain)
@@ -2297,7 +3611,12 @@ def score_project(project):
     # were actually reached.
 
     # ── Combine all signals ───────────────────────────────────────────────────
-    # Every dated signal becomes a (points, date, label) candidate. The score is
+    # Every dated signal becomes a (points, date, label, source) candidate.
+    # source is OWN for evidence the project left, or SITEMAP or WAYBACK for
+    # the two last resorts. A sitemap date is the site dating itself, so it
+    # earns the website bonus and is reported as the last activity date. A
+    # Wayback change does neither, and neither last resort sets Status Active
+    # or settles the page against a reading. The score is
     # the single best of these and never their sum, which is exactly the part a
     # reader cannot infer from the final number, so the breakdown has to name
     # which signal won and show the others as also-rans.
@@ -2308,13 +3627,13 @@ def score_project(project):
         if github_archived:
             s = min(s, 15)  # maintainers explicitly stopped work on the repo
         kind = next((k for k, v in gh["dates"].items() if v == github_date), None)
-        candidates.append((s, github_date, GH_SIGNAL_LABELS.get(kind, "GitHub activity")))
+        candidates.append(Candidate(s, github_date, GH_SIGNAL_LABELS.get(kind, "GitHub activity"), OWN))
 
     if blog_date:
-        candidates.append((recency_base_score(blog_date, now), blog_date, "Blog post"))
+        candidates.append(Candidate(recency_base_score(blog_date, now), blog_date, "Blog post", OWN))
 
     for dt, platform in social_dated:
-        candidates.append((social_recency_score(dt, now), dt, f"{platform} post"))
+        candidates.append(Candidate(social_recency_score(dt, now), dt, f"{platform} post", OWN))
 
     # What the project's own page says about itself. The page was already
     # downloaded for the social-link scrape, so this costs no extra request.
@@ -2333,6 +3652,9 @@ def score_project(project):
     # It is deliberately not extended to a timeout or a connection error, where
     # there is nothing to render and the wait would be paid twice.
     blocked_text = None
+    js_shell = False
+    homepage_html = None
+    homepage_text = None
     if website_url and site_verdict == "blocked" and not is_archived:
         _log(f"    website  → behind a bot check; trying a browser")
         candidate = render_page_text(website_url)
@@ -2353,6 +3675,7 @@ def score_project(project):
         # markup-based checks below simply find nothing, which is accurate.
         if page_html is None and blocked_text:
             page_html, page_headers = "", {}
+        homepage_html = page_html
         if page_html is not None:
             # A site can answer and still say nothing. An app that paints itself
             # in the browser serves a shell: the questionnaire, the dates, the
@@ -2361,7 +3684,11 @@ def score_project(project):
             # the same finding as reading no date off a page, so it is recorded
             # as its own fact rather than left to look like an absence.
             readable = blocked_text or readable_page(page_html)["text"]
+            # The words a visitor sees, rendered past a wall when that is how
+            # they were read, kept for the parked check below.
+            homepage_text = readable
             page_unreadable = len(readable) < MIN_READABLE_PAGE_CHARS
+            js_shell = page_unreadable and blocked_text is None
 
             # A shell is worth a second look through a browser, where the words
             # actually exist. Only a shell: the nine in ten pages that already
@@ -2375,15 +3702,18 @@ def score_project(project):
                     page_unreadable = False
                     _log(f"    render   → {len(rendered)} chars of text")
 
+            if rendered and not page_unreadable:
+                # A shell the browser filled in: its words are the page's.
+                homepage_text = rendered
             page_signals = page_date_signals(page_html, page_headers, now, text=rendered)
             if page_signals:
                 pdt, plabel = max(page_signals, key=lambda c: c[0])
-                candidates.append((page_recency_score(pdt, now), pdt, plabel))
+                candidates.append(Candidate(page_recency_score(pdt, now), pdt, plabel, OWN))
                 _log(f"    page     → {plabel}: {pdt:%Y-%m-%d}")
             news = latest_news_date(page_html, website_url, now) if page_html else None
             if news:
-                candidates.append((recency_base_score(news[0], now), news[0],
-                                   "Newest item on the site's own news page"))
+                candidates.append(Candidate(recency_base_score(news[0], now), news[0],
+                                   "Newest item on the site's own news page", OWN))
             page_closed, page_closed_phrase = page_says_closed(page_html, now, text=rendered)
             if page_closed:
                 _log(f"    page     → says it has closed: {page_closed_phrase!r}")
@@ -2391,7 +3721,10 @@ def score_project(project):
                 # The wording check found nothing and neither did any date. This
                 # is the narrow band the rules cannot settle, so it is the only
                 # band worth queueing for a reading. The run does not wait for
-                # one: it scores this record as though no reading existed.
+                # one: it scores this record as though no reading existed. The
+                # sitemap and the archive, asked below, neither add to this band
+                # nor take from it: a homepage rewritten to announce a closure
+                # is exactly the change the archive sees.
                 words = rendered if rendered is not None else readable
                 pending_adjudication = adjudication_candidate(name, website_url, words)
                 if pending_adjudication:
@@ -2403,8 +3736,96 @@ def score_project(project):
                 if page_copyright_year:
                     _log(f"    page     → footer copyright {page_copyright_year}")
 
-    best_score = max((c[0] for c in candidates), default=0)
-    best_date  = max((c[1] for c in candidates), default=None)
+    # Two last resorts for a site that answered, or sat behind a wall, and
+    # dated nothing: the site's sitemap, then the archive's record of when the
+    # page last changed. Both are asked only here, when the record would
+    # otherwise be Unknown, because both cost requests and both are weaker than
+    # any signal already found. A site that did not respond, is gone, or whose
+    # page moved is not asked: the archive would date a page nobody can reach.
+    # An article with no homepage found in it, or an address that cannot be
+    # checked, is not the project's site, so neither is asked about either.
+    # Behind a wall only the archive is asked, since the wall that refused the
+    # homepage refuses the sitemap too.
+    fresh_copyright = (page_copyright_year is not None
+                       and page_copyright_year >= now.year - 1)
+    project_site = url_class == "homepage" or (url_class == "article" and discovered_url)
+    # A stale social post scores 0 and is no reason to stop looking.
+    # Asked when nothing the project left is recent: a three-year-old commit
+    # scoring 35 is no reason not to look for something newer.
+    recent_own = any(c.own and c.score > 0 and (now - c.date).days <= STALE_AFTER_DAYS
+                     for c in candidates)
+    # A listed homepage that itself reads as parked or for sale is not the
+    # project's site, and its sitemap and archive would date the parking page.
+    last_resorts = bool(
+        not recent_own and website_url and project_site
+        and not page_closed and not is_archived and site_verdict in ("ok", "blocked")
+        # A snapshot address dates the snapshot, not the project, whether
+        # or not the original still answers.
+        and not is_archive_host(raw_url) and not is_archive_host(website_url))
+    # Worked out only when the last resorts would run, from the words already
+    # read, rendered past a wall included.
+    parked = last_resorts and _looks_parked(
+        website_url, _PAGE_FINAL.get(website_url) or website_url,
+        html=homepage_html, text=homepage_text)
+    if last_resorts and not parked:
+        found = None
+        # The last resorts get the caller's budget, or LAST_RESORTS_S of their
+        # own when the caller gave none, so nothing can run past it unbounded.
+        stage = time.monotonic() + LAST_RESORTS_S
+        lr_deadline = deadline if deadline is not None else stage
+        # Where the homepage moved, worked out once for both last resorts.
+        # The parked verdict is already settled above, and the last resorts
+        # only run on a page that is not parked.
+        landed = landed_url(website_url, check_parked=False)
+        if website_alive is True and site_verdict == "ok":
+            # The sitemap gets SITEMAP_SHARE_S of it at most, so the archive's
+            # reads, four seconds apart, still fit in what is left.
+            sitemap_deadline = min(lr_deadline, time.monotonic() + SITEMAP_SHARE_S)
+            found = sitemap_date(website_url, now, deadline=sitemap_deadline, landed=landed)
+            if found:
+                if found.build:
+                    candidates.append(Candidate(wayback_recency_score(found.date, now), found.date,
+                                       SITEMAP_BUILD_LABEL, BUILD))
+                    _log(f"    sitemap  → whole-site publish {found.date:%Y-%m-%d} in {found.source[:70]}")
+                    if found.page_date is not None:
+                        # The publish scores; the older page date is still the
+                        # newest the site gave a page, so it stays on record.
+                        candidates.append(Candidate(page_recency_score(found.page_date, now),
+                                           found.page_date, SITEMAP_LABEL, SITEMAP))
+                else:
+                    candidates.append(Candidate(page_recency_score(found.date, now), found.date,
+                                       SITEMAP_LABEL, SITEMAP))
+                    _log(f"    sitemap  → newest change {found.date:%Y-%m-%d} in {found.source[:70]}")
+            else:
+                _log(f"    sitemap  → nothing dated and believable")
+        # A page built by script changes its bundle's name on every deploy, so
+        # the archive sees a new hash whether or not anything on it changed.
+        # A sitemap date older than a year scores below what a recent change
+        # in the archive would, so the archive is asked then too, and the
+        # higher of the two wins as the strongest signal.
+        sitemap_old = found and (now - found.date).days > WAYBACK_RECENT_CHANGE_DAYS
+        if (not found or sitemap_old) and not fresh_copyright and not js_shell:
+            changed = wayback_change_date(website_url, now, deadline=lr_deadline, landed=landed)
+            if changed:
+                candidates.append(Candidate(wayback_recency_score(changed, now), changed,
+                                   WAYBACK_LABEL, WAYBACK))
+                _log(f"    wayback  → content last changed {changed:%Y-%m-%d}")
+
+    best_score = max((c.score for c in candidates), default=0)
+    best_date  = max((c.date for c in candidates), default=None)
+    # The archive's date is when the archive looked, not something the project
+    # did, so it counts toward the score and nothing else: it does not earn a
+    # live site the bonus a recent dated signal does, and it is not reported as
+    # the project's last activity.
+    last_date = max((c.date for c in candidates if c.source not in (WAYBACK, BUILD)), default=None)
+    # Whether Status may say Active follows the signal that set the score. A
+    # three-year-old commit beside a winning sitemap date does not make the
+    # sitemap's score the project's own.
+    winner = max(candidates, key=lambda c: (c.score, c.date)) if candidates else None
+    # The website bonus counts the newest dated signal, as before, unless the
+    # signal that set the score is the archive's or a publish.
+    bonus_date = (None if winner is not None and winner.source in (WAYBACK, BUILD)
+                  else last_date)
 
     score = float(best_score)
 
@@ -2415,13 +3836,12 @@ def score_project(project):
     why = []
 
     if candidates:
-        winner = max(candidates, key=lambda c: (c[0], c[1]))
-        why.append(f"Strongest signal: {winner[2]}, {describe_age(winner[1], now)} ({winner[0]})")
+        why.append(f"Strongest signal: {winner.label}, {describe_age(winner.date, now)} ({winner.score})")
         others = sorted((c for c in candidates if c is not winner),
-                        key=lambda c: c[0], reverse=True)
+                        key=lambda c: c.score, reverse=True)
         if others:
             why.append("Also found: " + ", ".join(
-                f"{c[2]} {describe_age(c[1], now)} ({c[0]})" for c in others))
+                f"{c.label} {describe_age(c.date, now)} ({c.score})" for c in others))
         if github_archived:
             why.append("The GitHub repository is archived, so however recent its last "
                        "activity is, it counts for at most 15")
@@ -2446,14 +3866,20 @@ def score_project(project):
         why.append("The listed address is an archive snapshot and the original no "
                    "longer answers (score capped at 10)")
     elif website_alive is True:
-        bonus  = website_alive_bonus(best_date, now)
+        bonus  = website_alive_bonus(bonus_date, now)
         before = score
         score  = min(score + bonus, 100)
-        why.append(_adjustment(
-            "Website is responding" if bonus == WEBSITE_ALIVE_BONUS
-            else "Website is responding, but nothing dated and recent was found to go "
-                 "with it",
-            bonus, score - before))
+        if bonus == WEBSITE_ALIVE_BONUS:
+            label = "Website is responding"
+        elif winner is not None and winner.source == WAYBACK:
+            label = ("Website is responding; the strongest sign is the Wayback Machine's "
+                     "record of the page changing")
+        elif winner is not None and winner.source == BUILD:
+            label = ("Website is responding; the strongest sign is a publish of the whole "
+                     "site listed in its sitemap")
+        else:
+            label = "Website is responding, but nothing dated and recent was found to go with it"
+        why.append(_adjustment(label, bonus, score - before))
     elif site_verdict == "relink":
         # The page is gone and its host is not. That is a stale link, not a
         # dead project, and the two want opposite rulings, so it takes a much
@@ -2472,7 +3898,7 @@ def score_project(project):
         before = score
         score  = max(score - 50, 0)  # strong signal of death
         why.append(_adjustment("Website did not respond", -50, score - before))
-    elif url_class == "article":
+    elif url_class == "article" and not discovered_url:
         why.append("The listed address is an article about the project rather than the "
                    "project itself, and no homepage could be found from it")
     elif website_unreadable:
@@ -2485,9 +3911,14 @@ def score_project(project):
         # Said out loud because it is a fact about the wall, not about the
         # project, and a reader comparing two low scores should be able to tell
         # "we could not look" from "we looked and found nothing".
-        why.append("The site is behind a bot check that refused both an ordinary "
-                   "request and a browser, so nothing on it could be read. This is "
-                   "not evidence either way about the project")
+        if winner is not None and winner.source == WAYBACK:
+            why.append("The site is behind a bot check that refused both an ordinary "
+                       "request and a browser, so the score rests on the Wayback "
+                       "Machine's record of the page changing")
+        else:
+            why.append("The site is behind a bot check that refused both an ordinary "
+                       "request and a browser, so nothing on it could be read. This is "
+                       "not evidence either way about the project")
     else:
         why.append("Website could not be checked: it timed out or refused the request")
 
@@ -2511,8 +3942,6 @@ def score_project(project):
         why.append("The website answers, but its text is built in the browser, so "
                    "nothing on the page could be read without running it")
 
-    fresh_copyright = (page_copyright_year is not None
-                       and page_copyright_year >= now.year - 1)
     if fresh_copyright:
         before = score
         score  = max(score, COPYRIGHT_FRESH_FLOOR)
@@ -2582,6 +4011,11 @@ def score_project(project):
     score  = round(score, 1)
     activity_status = "Unknown" if unknown else score_to_activity_status(score)
     status          = None      if unknown else score_to_status(score)
+    # The sitemap and the archive are the weakest dates there are. A score that
+    # rests on them alone can read Active, but it is not the confidence the
+    # Status field asks for, so Status is left alone.
+    if status == "Active" and winner is not None and not winner.own:
+        status = None
 
     # A finished piece of work is N/A, and it outranks anything the signals say.
     # A report does not stop being a report because the site hosting it went
@@ -2698,7 +4132,7 @@ def score_project(project):
         why.append(f"Total: {score:g} out of 100 - {activity_status}")
     breakdown = "\n".join(why)
 
-    last_activity_str = best_date.strftime("%Y-%m-%d") if best_date else None
+    last_activity_str = last_date.strftime("%Y-%m-%d") if last_date else None
     _log(f"    → score={'(cleared)' if score is None else score}  activity={activity_status}  "
           f"status={status or '(no change)'}  last_activity={last_activity_str}")
     if discovered_url:
