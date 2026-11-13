@@ -165,7 +165,7 @@ _PARKING_HOSTS = ("sedo.com", "sedoparking.com", "dan.com", "afternic.com", "hug
                   "parklogic.com", "uniregistry.com", "atom.com", "squadhelp.com")
 # Only wording about selling or parking the domain itself. "For sale" or "make
 # an offer" alone is what a shop says, and "this domain" alone is what a
-# licence line says ("all content on this domain is CC-BY").
+# license line says ("all content on this domain is CC-BY").
 _PARKED_TEXT = re.compile(
     r"this domain (?:name )?(?:is|may be) for sale|domain (?:name )?(?:is |may be )?for sale|"
     r"buy this domain|inquire about this domain|domain (?:is )?parked|parked free|"

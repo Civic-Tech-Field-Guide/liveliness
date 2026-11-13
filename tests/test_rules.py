@@ -2443,7 +2443,7 @@ def test_a_deep_page_sent_up_its_own_path_or_to_an_error_page_was_removed(monkey
     assert core.landed_url("https://x.org/tools/foo") == "https://x.org/projects/foo"
 
 
-def test_a_licence_line_about_this_domain_is_not_parked(monkeypatch):
+def test_a_license_line_about_this_domain_is_not_parked(monkeypatch):
     from liveliness import core
     page = "<p>All content on this domain is licensed under CC-BY 4.0.</p>"
     monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": (page, {})})
