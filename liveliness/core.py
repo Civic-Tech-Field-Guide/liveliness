@@ -2439,7 +2439,7 @@ WAYBACK_CDX           = "https://web.archive.org/cdx/search/cdx"
 WAYBACK_TIMEOUT_S     = 10
 WAYBACK_WINDOW        = 20      # recent real captures read to judge churn
 WAYBACK_FETCH_ROWS    = 40      # asked for, so bot checks can be dropped first
-WAYBACK_MIN_CAPTURES  = 6       # real captures needed before the hashes mean anything
+WAYBACK_MIN_CAPTURES  = 4       # distinct days with a real capture, before the hashes mean anything
 WAYBACK_TIMEOUTS_TO_PAUSE = 2
 WAYBACK_MAX_CHURN     = 0.5     # share of captures with a new hash that means churn
 WAYBACK_MIN_LENGTH    = 400     # record bytes; smaller 200s are bot checks and stubs
@@ -2746,7 +2746,8 @@ def wayback_change_date(url, now=None, deadline=None):
     if not rows:
         return None
     rows = sorted((r for r in rows if _real_capture(r)), key=lambda r: r[0])[-WAYBACK_WINDOW:]
-    if len(rows) < WAYBACK_MIN_CAPTURES:
+    # The query asks for one capture a day, so the count is of distinct days.
+    if len({r[0][:8] for r in rows}) < WAYBACK_MIN_CAPTURES:
         _log("    wayback  → too few captures of the page to judge")
         return None
     dt, settled, reason = wayback_change_from_captures(rows, now)

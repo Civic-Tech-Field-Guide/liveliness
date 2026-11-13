@@ -795,7 +795,8 @@ def test_small_captures_are_dropped_before_the_window_is_cut(monkeypatch):
 
 def test_too_few_real_captures_date_nothing(monkeypatch):
     from liveliness import core
-    rows = [["20260101000000", "A", "9000"], ["20260301000000", "A", "9000"],
+    # Three days of captures are too few; four are enough.
+    rows = [["20260301000000", "A", "9000"],
             ["20260601000000", "B", "9000"], ["20260801000000", "B", "9000"]]
     monkeypatch.setattr(core, "_cdx", lambda params: rows)
     assert core.wayback_change_date("https://x.org/", _now()) is None
@@ -1673,3 +1674,17 @@ def test_a_partner_that_cannot_be_read_says_why(monkeypatch):
     core.wayback_text_change(rows, "x.org/", now)
     assert not any("changes on every capture" in m for m in logged)
     assert any("could not be read" in m or "no time" in m or "read limit" in m for m in logged)
+
+
+def test_four_days_of_captures_are_enough(monkeypatch):
+    from datetime import timedelta
+    from liveliness import core
+    now = _now()
+    day = lambda d: (now - timedelta(days=d)).strftime("%Y%m%d120000")
+    rows = [[day(200), "A", "9000", "200", "text/html"], [day(150), "A", "9000", "200", "text/html"],
+            [day(60), "B", "9000", "200", "text/html"], [day(20), "B", "9000", "200", "text/html"]]
+    monkeypatch.setattr(core, "_cdx", lambda params: rows)
+    dt = core.wayback_change_date("https://x.org/", now)
+    assert dt is not None and dt.strftime("%Y%m%d120000") == day(60)
+    monkeypatch.setattr(core, "_cdx", lambda params: rows[1:])
+    assert core.wayback_change_date("https://x.org/", now) is None
