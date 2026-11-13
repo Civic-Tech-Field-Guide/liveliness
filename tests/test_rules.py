@@ -918,7 +918,7 @@ def test_the_archive_is_asked_about_the_page_with_its_query(monkeypatch):
     asked = []
     monkeypatch.setattr(core, "_cdx", lambda params, **k: asked.append(params["url"]) or None)
     core.wayback_change_date("https://x.org/project.php?id=12", _now())
-    assert asked == ["x.org/project.php?id=12"]
+    assert asked[0] == "x.org/project.php?id=12"
 
 
 def test_where_robots_txt_redirects_is_not_the_site(monkeypatch):
@@ -1060,7 +1060,7 @@ def test_the_archive_is_asked_about_where_the_homepage_landed(monkeypatch):
     asked = []
     monkeypatch.setattr(core, "_cdx", lambda params, **k: asked.append(params["url"]) or None)
     core.wayback_change_date("https://x.org/", _now())
-    assert asked == ["www.x.org/home"]
+    assert asked[0] == "www.x.org/home"
 
 
 def test_an_archive_only_score_does_not_say_nothing_recent_was_found(monkeypatch):
@@ -1782,3 +1782,28 @@ def test_distinctive_names_reuse_the_word_filter():
     from liveliness import core
     assert core._distinctive_name("Code for America") == core._distinctive_words("Code for America")
     assert core._distinctive_name("Vox AI") == ""
+
+
+def test_an_empty_answer_to_a_heavy_query_is_retried_smaller(monkeypatch):
+    # A heavily archived site can make the year-long query time out inside the
+    # archive, which answers 200 with an empty body. That is not "no captures".
+    from datetime import timedelta
+    from liveliness import core
+    now = _now()
+    rows = [[(now - timedelta(days=d)).strftime("%Y%m%d120000"), "A" if d > 30 else "B",
+             "9000", "200", "text/html"] for d in range(60, 0, -1)]
+    asked = []
+    def cdx(params, **k):
+        asked.append(params["limit"])
+        return None if abs(params["limit"]) >= core.WAYBACK_LOOKBACK_DAYS else rows
+    monkeypatch.setattr(core, "_cdx", cdx)
+    dt = core.wayback_change_date("https://x.org/", now)
+    assert len(asked) == 2 and dt is not None and (now - dt).days == 30
+
+
+def test_an_empty_cdx_body_is_not_an_empty_list(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_wayback_get", lambda url, params=None, deadline=None: _FakeResponse(url, ""))
+    assert core._cdx({"url": "x.org/"}) is None
+    monkeypatch.setattr(core, "_wayback_get", lambda url, params=None, deadline=None: _FakeResponse(url, "[]"))
+    assert core._cdx({"url": "x.org/"}) == []

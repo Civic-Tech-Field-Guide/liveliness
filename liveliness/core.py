@@ -2474,6 +2474,7 @@ WAYBACK_MAX_CHURN     = 0.5     # share of captures with a new hash that means c
 WAYBACK_MIN_LENGTH    = 400     # record bytes; smaller 200s are bot checks and stubs
 WAYBACK_RECENT_CHANGE_DAYS  = 365
 WAYBACK_LOOKBACK_DAYS       = 400   # captures asked for: the year, and a little before it
+WAYBACK_FALLBACK_DAYS       = 60    # asked for when the archive gives up on the full query
 WAYBACK_MIN_INTERVAL_S = 4
 WAYBACK_PAUSE_S       = 600
 WAYBACK_LABEL         = "Last content change seen by the Wayback Machine"
@@ -2547,8 +2548,13 @@ def _cdx(params, deadline=None):
     r = _wayback_get(WAYBACK_CDX, dict(params, output="json"), deadline)
     if r is None:
         return None
+    # No captures comes back as "[]". An empty body is the archive giving up on
+    # a query too heavy for it, which says nothing about the page.
+    if not r.text.strip():
+        _log("    wayback  → the archive returned nothing for that query")
+        return None
     try:
-        rows = json.loads(r.text) if r.text.strip() else []
+        rows = json.loads(r.text)
     except ValueError:
         return None
     return [row for row in rows[1:] if isinstance(row, list) and len(row) >= 2]
@@ -2781,8 +2787,13 @@ def wayback_change_date(url, now=None, deadline=None, landed=None):
     # One capture a day over the last WAYBACK_LOOKBACK_DAYS, so a page captured
     # many times a day still has captures six months and a year back in reach.
     since = (now - timedelta(days=WAYBACK_LOOKBACK_DAYS)).strftime("%Y%m%d")
-    rows = _cdx(dict(base, limit=-(WAYBACK_LOOKBACK_DAYS + 10), fastLatest="true",
-                     collapse="timestamp:8", **{"from": since}), deadline=deadline)
+    query = dict(base, fastLatest="true", collapse="timestamp:8", **{"from": since})
+    rows = _cdx(dict(query, limit=-(WAYBACK_LOOKBACK_DAYS + 10)), deadline=deadline)
+    if rows is None and time.monotonic() >= _wayback_paused_till:
+        # A heavily archived page can make the year-long query time out inside
+        # the archive. The latest WAYBACK_FALLBACK_DAYS days still date a
+        # recent change, though a capture a year back is then out of reach.
+        rows = _cdx(dict(query, limit=-WAYBACK_FALLBACK_DAYS), deadline=deadline)
     if not rows:
         return None
     # Every day of the window is kept, so the six-month and one-year captures
