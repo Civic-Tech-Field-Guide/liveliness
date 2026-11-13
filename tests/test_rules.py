@@ -2362,13 +2362,22 @@ def test_parked_wording_has_to_be_about_the_domain(monkeypatch):
     assert core._looks_parked("https://x.org/", "https://x.org/")
 
 
-def test_an_archive_that_has_not_looked_for_ninety_days_dates_nothing():
-    from datetime import timedelta
+def test_a_homepage_that_now_lands_on_parking_gets_no_archive_date(monkeypatch):
+    # A lapsed domain: the archive still holds the old site's changes, but the
+    # live homepage lands on a parking host, so neither last resort is asked.
+    from datetime import datetime, timedelta, timezone
     from liveliness import core
-    now = _now()
-    day = lambda d: (now - timedelta(days=d)).strftime("%Y%m%d120000")
-    rows = [[day(300), "A"], [day(250), "A"], [day(200), "B"], [day(120), "B"]]
-    assert core.wayback_change_from_captures(rows, now)[0] is None
+    _undated_live_site(monkeypatch, core)
+    page = "<title>x.org</title>" + "<p>Some words about many different things here.</p>" * 40
+    def fetch(u):
+        core._PAGE_FINAL[u] = "https://www.hugedomains.com/domain_profile.cfm?d=x.org"
+        return page, {}
+    monkeypatch.setattr(core, "get_page_cached", fetch)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
+    old_site_change = datetime.now(timezone.utc) - timedelta(days=200)
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: old_site_change)
+    r = core.score_project(Project(name="x", website="https://x.org/"))
+    assert core.WAYBACK_LABEL not in r["breakdown"] and r["activity_status"] == "Unknown"
 
 
 def test_a_build_pass_spans_at_most_thirty_minutes():

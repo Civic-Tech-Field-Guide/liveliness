@@ -2599,7 +2599,6 @@ WAYBACK_MIN_LENGTH    = 400     # record bytes; smaller 200s are bot checks and 
 WAYBACK_RECENT_CHANGE_DAYS  = 365
 WAYBACK_LOOKBACK_DAYS       = 400   # captures asked for: the year, and a little before it
 WAYBACK_FALLBACK_DAYS       = 60    # asked for when the archive gives up on the full query
-WAYBACK_NEWEST_MAX_DAYS     = 90    # the newest capture must be this recent to date anything
 WAYBACK_MIN_INTERVAL_S = 4
 WAYBACK_PAUSE_S       = 600
 WAYBACK_LABEL         = "Last content change seen by the Wayback Machine"
@@ -2719,15 +2718,10 @@ def wayback_change_from_captures(rows, now=None):
                    WAYBACK_RECENT_CHANGE_DAYS, so the change could have come
                    at any point after it
       "unsettled"  unchanged across the rows (the date is the first row's)
-      "old"        given `now`, the newest capture is over WAYBACK_NEWEST_MAX_DAYS old
     """
     rows = [r for r in rows if _cdx_time(r[0]) is not None]
     if len(rows) < 2:
         return None, True, "few"
-    # An archive that has not looked in WAYBACK_NEWEST_MAX_DAYS cannot say the
-    # page is kept up now, whatever changed before then.
-    if now is not None and (now - _cdx_time(rows[-1][0])).days > WAYBACK_NEWEST_MAX_DAYS:
-        return None, True, "old"
     digests = [r[1] for r in rows]
     changes = sum(1 for a, b in zip(digests, digests[1:]) if a != b)
     if changes / (len(rows) - 1) > WAYBACK_MAX_CHURN:
@@ -2974,7 +2968,6 @@ def wayback_change_date(url, now=None, deadline=None, landed=None):
         return reject_future(dt)
     if dt is None:
         _log({"few": "    wayback  → too few captures",
-              "old": "    wayback  → the archive has not captured the page in 90 days",
               "noise": "    wayback  → the hash changes on most captures, and a deep "
                        "page's text is not compared",
               "stale": "    wayback  → the archive did not look for a year before "
