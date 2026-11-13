@@ -34,7 +34,7 @@ from collections import Counter
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser as _HTMLParser
-from urllib.parse import urljoin, parse_qs, parse_qsl, urlparse
+from urllib.parse import urljoin, parse_qs, parse_qsl, urlparse, urlunparse
 
 import requests
 
@@ -2449,7 +2449,11 @@ def wayback_change_date(url, now=None):
         _log("    wayback  → too few captures of the page to judge")
         return None
     dt, settled = wayback_change_from_captures(rows, now)
-    if dt is None and _hash_is_noise(rows):
+    # The text is compared only on a homepage. A deep page on an institution's
+    # site carries the institution's news box, so its text changes with the
+    # host's news, not with the listing. Deep pages keep to the hashes.
+    homepage = _path_prefix(urlunparse(p)) == ""
+    if dt is None and homepage and _hash_is_noise(rows):
         dt = wayback_text_change(rows, target, now)
         if dt is None:
             _log("    wayback  → the page's text did not change within the year, "

@@ -1164,3 +1164,19 @@ def test_a_publish_scores_like_an_archive_change(monkeypatch):
     r = core.score_project(Project(name="x", website="https://x.org/"))
     assert r["score"] == 50 and r["status"] is None and r["last_activity_date"] is None
     assert core.SITEMAP_BUILD_LABEL in r["breakdown"]
+
+
+def test_a_deep_page_keeps_to_the_hash_method(monkeypatch):
+    # A deep page on an institution's site shares its news box with the whole
+    # site, so its text changing is the host's news, not the listing's.
+    from liveliness import core
+    now = _now()
+    monkeypatch.setattr(core, "_cdx", lambda params: _churny_rows(now))
+    def never(ts, target):
+        raise AssertionError("a deep page's text is not compared")
+    monkeypatch.setattr(core, "_archived_words", never)
+    assert core.wayback_change_date("https://www.parlamento.pt/EspacoCidadao/Paginas/x.aspx", now) is None
+    assert core.wayback_change_date("https://x.gov.br/projetos/opa/", now) is None
+    # A language root is the homepage, and keeps the fallback.
+    monkeypatch.setattr(core, "_archived_words", lambda ts, target: None)
+    assert core.wayback_change_date("https://x.org/en/", now) is None
