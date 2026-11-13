@@ -283,7 +283,7 @@ def _fake_web(monkeypatch, core, pages):
     Anything else answers 404. Returns the list of URLs requested.
     """
     seen = []
-    def get(url, timeout=10, headers=None, deadline_s=None):
+    def get(url, timeout=10, headers=None, deadline_s=None, max_bytes=None):
         seen.append(url)
         page = pages.get(url)
         if page is None:
@@ -392,7 +392,7 @@ def test_each_sitemap_fetch_is_held_to_the_time_left(monkeypatch):
     import time
     from liveliness import core
     caps = []
-    def get(url, timeout=10, headers=None, deadline_s=None):
+    def get(url, timeout=10, headers=None, deadline_s=None, max_bytes=None):
         caps.append((timeout, deadline_s))
         return _FakeResponse(url, "<html>not found</html>", 404)
     monkeypatch.setattr(core, "get_limited", get)
@@ -414,28 +414,28 @@ def test_the_first_capture_of_the_current_content_dates_the_change():
     from liveliness import core
     rows = [["20250101000000", "A"], ["20250301000000", "A"], ["20250601000000", "B"],
             ["20250901000000", "B"], ["20260101000000", "B"]]
-    dt, settled = core.wayback_change_from_captures(rows)
-    assert settled and (dt.year, dt.month) == (2025, 6)
+    dt, settled, reason = core.wayback_change_from_captures(rows)
+    assert settled and reason is None and (dt.year, dt.month) == (2025, 6)
 
 
 def test_a_page_whose_hash_changes_on_every_capture_dates_nothing():
     from liveliness import core
     rows = [["2026%02d01000000" % m, "H%d" % m] for m in range(1, 11)]
-    assert core.wayback_change_from_captures(rows) == (None, True)
+    assert core.wayback_change_from_captures(rows) == (None, True, "noise")
 
 
 def test_a_page_flipping_between_two_versions_dates_nothing():
     from liveliness import core
     rows = [["20260101000000", "A"], ["20260201000000", "A"], ["20260301000000", "B"],
             ["20260401000000", "B"], ["20260501000000", "A"]]
-    assert core.wayback_change_from_captures(rows) == (None, True)
+    assert core.wayback_change_from_captures(rows) == (None, True, "noise")
 
 
 def test_unchanged_across_every_capture_is_not_settled():
     from liveliness import core
     rows = [["20260101000000", "A"], ["20260201000000", "A"], ["20260301000000", "A"]]
-    dt, settled = core.wayback_change_from_captures(rows)
-    assert not settled and dt.month == 1
+    dt, settled, reason = core.wayback_change_from_captures(rows)
+    assert not settled and reason == "unsettled" and dt.month == 1
 
 
 def test_a_page_unchanged_across_every_capture_dates_nothing(monkeypatch):
@@ -824,9 +824,9 @@ def test_a_change_after_a_long_gap_in_captures_is_not_dated_recent():
     # time in that gap.
     from liveliness import core
     rows = [["2016%02d01000000" % m, "A"] for m in range(1, 10)] + [["20260901000000", "B"]]
-    assert core.wayback_change_from_captures(rows, _now()) == (None, True)
+    assert core.wayback_change_from_captures(rows, _now()) == (None, True, "stale")
     near = [["2026%02d01000000" % m, "A"] for m in range(1, 8)] + [["20260901000000", "B"]]
-    dt, settled = core.wayback_change_from_captures(near, _now())
+    dt, settled, _ = core.wayback_change_from_captures(near, _now())
     assert settled and (dt.year, dt.month) == (2026, 9)
 
 
@@ -982,7 +982,7 @@ def test_a_generator_pass_spread_over_minutes_is_one_pass():
 def test_a_capture_with_a_bad_timestamp_is_skipped():
     from liveliness import core
     rows = [["2026%02d01000000" % m, "A"] for m in range(1, 6)] + [["garbage", "A"], ["20260901000000", "B"]]
-    dt, settled = core.wayback_change_from_captures(rows, _now())
+    dt, settled, _ = core.wayback_change_from_captures(rows, _now())
     assert settled and (dt.year, dt.month) == (2026, 9)
 
 
@@ -1089,7 +1089,7 @@ def test_robots_sitemaps_returns_only_the_list(monkeypatch):
 
 def _churny_rows(now, n=12):
     # A capture every three weeks over the last eight months, each with its own
-    # hash, which is what most maintained pages look like in the archive.
+    # hash, which is what 48 of 60 sampled undated listings looked like in the archive.
     from datetime import timedelta
     return [[(now - timedelta(days=21 * (n - i))).strftime("%Y%m%d%H%M%S"), "H%d" % i, "40000",
              "200", "text/html"] for i in range(n)]
@@ -1180,3 +1180,112 @@ def test_a_deep_page_keeps_to_the_hash_method(monkeypatch):
     # A language root is the homepage, and keeps the fallback.
     monkeypatch.setattr(core, "_archived_words", lambda ts, target: None)
     assert core.wayback_change_date("https://x.org/en/", now) is None
+
+
+
+# ── Review of 023cdd8 ─────────────────────────────────────────────────────────
+
+def test_an_archive_snapshot_address_skips_both_last_resorts(monkeypatch):
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    def never(*a, **k):
+        raise AssertionError("an archive snapshot is not dated by the last resorts")
+    monkeypatch.setattr(core, "sitemap_date", never)
+    monkeypatch.setattr(core, "wayback_change_date", never)
+    core.score_project(Project(name="x", website="https://web.archive.org/web/2020/https://x.org/"))
+
+
+def test_only_real_language_codes_are_language_roots():
+    from liveliness import core
+    for path in ("/en/", "/de", "/pt-br/", "/zh-hant/"):
+        assert core._path_prefix("https://x.org" + path) == "", path
+    for path in ("/ai/", "/us/", "/hr/", "/dc/", "/go/"):
+        assert core._path_prefix("https://x.org" + path) != "", path
+
+
+def test_a_server_error_on_one_capture_does_not_pause_the_archive(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
+    monkeypatch.setattr(core, "_wayback_last_call", 0.0)
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    monkeypatch.setattr(core, "get_limited",
+                        lambda url, timeout=10, headers=None, deadline_s=None, max_bytes=None:
+                        _FakeResponse(url, "oops", 503))
+    assert core._archived_words("20260101000000", "x.org/") is None
+    assert core._wayback_paused_till == 0.0
+
+
+def test_archived_pages_are_read_with_the_byte_cap(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_wayback_paused_till", 0.0)
+    monkeypatch.setattr(core.time, "sleep", lambda s: None)
+    calls = []
+    page = "<html><body>" + " ".join("word%s" % c for c in "abcdefghijklmnopqrstuvwxyz") * 3 + "</body></html>"
+    def limited(url, timeout=10, headers=None, deadline_s=None, max_bytes=None):
+        calls.append(url)
+        return _FakeResponse(url, page)
+    monkeypatch.setattr(core, "get_limited", limited)
+    def no_session(*a, **k):
+        raise AssertionError("page reads go through get_limited")
+    monkeypatch.setattr(core.SESSION, "get", no_session)
+    core._archived_words("20260101000000", "x.org/")
+    assert calls and "id_/" in calls[0]
+
+
+def test_the_sitemap_is_read_where_the_homepage_landed(monkeypatch):
+    from liveliness import core
+    monkeypatch.setattr(core, "_PAGE_CACHE", {})
+    monkeypatch.setattr(core, "_PAGE_FINAL", {})
+    theirs = '<urlset><url><loc>https://newname.org/a</loc><lastmod>2026-09-01</lastmod></url></urlset>'
+    _fake_web(monkeypatch, core, {"https://x.org/": ("<html></html>", "https://newname.org/"),
+                                  "https://newname.org/sitemap.xml": theirs})
+    core.get_page_cached("https://x.org/")
+    dt, _ = core.sitemap_date("https://x.org/", _now())
+    assert (dt.month, dt.day) == (9, 1)
+
+
+def test_the_sitemap_age_limit_is_the_stale_limit():
+    from liveliness import core
+    assert core.SITEMAP_MAX_AGE_DAYS == core.STALE_AFTER_DAYS
+
+
+def test_a_large_sitemap_is_read_past_the_page_cap(monkeypatch):
+    import time
+    from liveliness import core
+    filler = "".join('<url><loc>https://x.org/p%d</loc><lastmod>2020-01-01</lastmod></url>' % i
+                     for i in range(25000))
+    body = ('<urlset>' + filler +
+            '<url><loc>https://x.org/new</loc><lastmod>2026-09-01</lastmod></url></urlset>').encode()
+    assert len(body) > core.MAX_FETCH_BYTES
+
+    class Stream:
+        status_code, headers, url, encoding = 200, {}, "https://x.org/sitemap.xml", "utf-8"
+        def iter_content(self, chunk_size=8192):
+            for i in range(0, len(body), chunk_size):
+                yield body[i:i + chunk_size]
+        def close(self):
+            pass
+    monkeypatch.setattr(core.SESSION, "get", lambda *a, **k: Stream())
+    text, _ = core._sitemap_body("https://x.org/sitemap.xml", time.monotonic() + 30)
+    assert "https://x.org/new" in text
+
+
+def test_text_fallback_skips_rows_with_bad_timestamps(monkeypatch):
+    from liveliness import core
+    now = _now()
+    rows = _churny_rows(now) + [["garbage", "Z", "40000", "200", "text/html"]]
+    monkeypatch.setattr(core, "_archived_words", lambda ts, target: None)
+    assert core.wayback_text_change(rows, "x.org/", now) is None
+
+
+def test_a_page_picked_out_by_its_query_is_not_a_homepage(monkeypatch):
+    from liveliness import core
+    now = _now()
+    monkeypatch.setattr(core, "_cdx", lambda params: _churny_rows(now))
+    def never(ts, target):
+        raise AssertionError("a query-named page's text is not compared")
+    monkeypatch.setattr(core, "_archived_words", never)
+    assert core.wayback_change_date("https://x.org/?page=12", now) is None
+    # Tracking parameters do not make a page of the homepage.
+    monkeypatch.setattr(core, "_archived_words", lambda ts, target: None)
+    assert core.wayback_change_date("https://x.org/?utm_source=mail", now) is None

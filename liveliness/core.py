@@ -135,20 +135,22 @@ def landed_url(url):
     return final
 
 
-def get_limited(url, timeout=10, headers=None, deadline_s=None):
-    """GET that stops reading at MAX_FETCH_BYTES or FETCH_DEADLINE_S of
-    wall-clock time, whichever comes first. Raises like requests.get.
+def get_limited(url, timeout=10, headers=None, deadline_s=None, max_bytes=None):
+    """GET that stops reading at MAX_FETCH_BYTES (or max_bytes) or
+    FETCH_DEADLINE_S of wall-clock time, whichever comes first. Raises like
+    requests.get.
     A server dripping bytes too slowly to ever fill a chunk can still hold
     the read open — the per-record SIGALRM budget is the backstop there."""
     limit = FETCH_DEADLINE_S if deadline_s is None else min(deadline_s, FETCH_DEADLINE_S)
     r = SESSION.get(url, timeout=timeout, allow_redirects=True, stream=True,
                     headers=headers)
+    cap = max_bytes or MAX_FETCH_BYTES
     start, size, chunks = time.monotonic(), 0, []
     try:
         for chunk in r.iter_content(chunk_size=8192):
             chunks.append(chunk)
             size += len(chunk)
-            if size >= MAX_FETCH_BYTES or time.monotonic() - start > limit:
+            if size >= cap or time.monotonic() - start > limit:
                 break
     finally:
         r.close()
@@ -1829,7 +1831,11 @@ class SitemapFind(tuple):
 # dates would land a live site in Possibly Inactive or Inactive on the strength
 # of a file most visitors never see, so they count for nothing and the archive
 # is asked instead.
-SITEMAP_MAX_AGE_DAYS    = 548
+SITEMAP_MAX_AGE_DAYS    = 548           # STALE_AFTER_DAYS; checked equal below it
+# A sitemap lists its newest entries last as often as first, and a plain
+# urlset of 25,000 entries runs to a few megabytes, so it gets a larger cap
+# than a page. The deadline still bounds the read.
+SITEMAP_MAX_BYTES       = 10_000_000
 
 _SITEMAP_ENTRY_RE = re.compile(r"<(?:\w+:)?(url|sitemap)\b[^>]*>([\s\S]*?)</(?:\w+:)?\1\s*>", re.I)
 # The image, video and news extensions put a <loc> of their own inside an
@@ -1864,7 +1870,8 @@ def _sitemap_body(url, deadline):
     if remaining <= 1:
         return None
     try:
-        r = get_limited(url, timeout=min(SITEMAP_TIMEOUT_S, remaining), deadline_s=remaining)
+        r = get_limited(url, timeout=min(SITEMAP_TIMEOUT_S, remaining), deadline_s=remaining,
+                        max_bytes=SITEMAP_MAX_BYTES)
     except Exception:
         return None
     if r.status_code != 200 or not r.content:
@@ -1898,7 +1905,24 @@ def parse_sitemap(text):
     return kind, entries
 
 
-_LANGUAGE_ROOT = re.compile(r"^/[a-z]{2}(?:[-_][a-z]{2,4})?$", re.I)
+# ISO 639-1 codes, so /ai, /us, /dc or /go, which are sections, are not read
+# as a language. /hr is Croatian, but appears more often as a human-resources
+# section, so it is left out.
+_LANGUAGE_CODES = frozenset("""
+ab aa af ak sq am ar an hy as av ae ay az bm ba eu be bn bi bs br bg my ca ch
+ce ny zh cv kw co cr cs da dv nl dz en eo et ee fo fj fi fr ff gl ka de el gn
+gu ht ha he hz hi ho hu ia ie ga ig ik io is it iu ja jv kl kn kr ks kk km ki
+rw ky kv kg ko ku kj la lb lg li ln lo lt lu lv gv mk mg ms ml mt mi mr mh mn
+na nv nd ne ng nb nn no ii nr oc oj cu om or os pa pi fa pl ps pt qu rm rn ro
+ru sa sc sd se sm sg sr gd sn si sk sl so st es su sw ss sv ta te tg th ti bo
+tk tl tn to tr ts tt tw ty ug uk ur uz ve vi vo wa cy wo fy xh yi yo za zu
+""".split())
+_LANGUAGE_ROOT = re.compile(r"^/([a-z]{2})(?:[-_][a-z]{2,4})?$", re.I)
+
+
+def _is_language_root(path):
+    m = _LANGUAGE_ROOT.match(path)
+    return bool(m) and m.group(1).lower() in _LANGUAGE_CODES
 
 
 def _path_prefix(url):
@@ -1908,7 +1932,7 @@ def _path_prefix(url):
     path = re.sub(r"/(?:index|default)\.\w+$", "", path, flags=re.I)
     # /en or /pt-br is the site's homepage in one language, not a section of
     # it: the sitemap often lists only the default language's pages.
-    return "" if _LANGUAGE_ROOT.match(path) else path
+    return "" if _is_language_root(path) else path
 
 
 def _within(loc, prefix):
@@ -2104,17 +2128,22 @@ def sitemap_date(url, now):
     # other page of that kind, so no sitemap entry can be told to be this one.
     if _identifying_query(p.query) or _hash_route(p):
         return None
-    root = "%s://%s" % (p.scheme or "https", p.netloc)
-    prefix = _path_prefix(url)
     hosts = {_site_host(url)}
-    deadline = time.monotonic() + SITEMAP_DEADLINE_S
-    fetches = 1
-    # Where the homepage itself redirected is the site under its new name, and
-    # is trusted before any sitemap is read. Where robots.txt redirects is not:
-    # a parked or hijacked robots.txt can land anywhere.
+    # Where the homepage itself redirected is the site under its new name. It
+    # is trusted before any sitemap is read, and the sitemap is looked for
+    # there. Where robots.txt redirects is not: a parked or hijacked
+    # robots.txt can land anywhere.
     landed = landed_url(url)
     if landed != url:
+        lp = urlparse(landed)
+        if _identifying_query(lp.query) or _hash_route(lp):
+            return None
         hosts.add(_site_host(landed))
+        p, url = lp, landed
+    root = "%s://%s" % (p.scheme or "https", p.netloc)
+    prefix = _path_prefix(url)
+    deadline = time.monotonic() + SITEMAP_DEADLINE_S
+    fetches = 1
     tops = _robots_sitemaps(root, deadline)
     tops += [root + s for s in SITEMAP_PATHS if root + s not in tops]
 
@@ -2221,7 +2250,14 @@ def _wayback_get(url, params=None):
     """
     One request to the archive, spaced and paused as the archive asks, or None
     when it could not be asked or refused.
+
+    A CDX query (with params) that fails or meets a server error pauses the
+    archive, since every later record would meet the same. An archived page
+    read (no params) goes through get_limited, for its byte cap and deadline,
+    and a failure or server error on it only skips that capture: one bad
+    capture says nothing about the archive. A 429 pauses either way.
     """
+    page = params is None
     global _wayback_last_call, _wayback_paused_till, _wayback_timeouts
     now = time.monotonic()
     if now < _wayback_paused_till:
@@ -2231,8 +2267,13 @@ def _wayback_get(url, params=None):
         time.sleep(wait)
     _wayback_last_call = time.monotonic()
     try:
-        r = SESSION.get(url, params=params, timeout=WAYBACK_TIMEOUT_S)
+        if page:
+            r = get_limited(url, timeout=WAYBACK_TIMEOUT_S, deadline_s=WAYBACK_TIMEOUT_S)
+        else:
+            r = SESSION.get(url, params=params, timeout=WAYBACK_TIMEOUT_S)
     except Exception:
+        if page:
+            return None
         # One slow answer is the archive being slow. Two in a row is the
         # archive struggling, and every later record would wait on it too.
         _wayback_timeouts += 1
@@ -2243,6 +2284,8 @@ def _wayback_get(url, params=None):
         else:
             _log("    wayback  → no answer")
         return None
+    if page and r.status_code != 429:
+        return r if r.status_code == 200 else None
     _wayback_timeouts = 0
     if r.status_code == 429 or r.status_code >= 500:
         _wayback_paused_till = time.monotonic() + WAYBACK_PAUSE_S
@@ -2275,22 +2318,28 @@ def _cdx_time(ts):
 def wayback_change_from_captures(rows, now=None):
     """
     The first capture of the newest content, from (timestamp, digest) rows in
-    time order, as (datetime | None, settled). settled is False when the newest
-    content already held at the start of the rows, so its first capture is
-    earlier than anything here, and the rows can only bound it.
+    time order, as (datetime | None, settled, reason). settled is False when
+    the newest content already held at the start of the rows, so its first
+    capture is earlier than anything here, and the rows can only bound it.
 
-    None for the date when the rows cannot date a change: too few of them, a
-    page whose hash changes on most captures, or, given `now`, a change whose
-    previous capture is older than WAYBACK_RECENT_CHANGE_DAYS. The change could
-    have come at any point after that capture, so its date says nothing recent.
+    reason is None when the rows date a change, else why not:
+      "few"        fewer than two usable rows
+      "noise"      the hash changes on most captures, or flips back to an
+                   earlier one, so only the text can date a change. 48 of 60
+                   sampled undated listings looked like this in November 2026,
+                   from form tokens, rotating banners or alternating versions
+      "stale"      given `now`, the capture before the change is older than
+                   WAYBACK_RECENT_CHANGE_DAYS, so the change could have come
+                   at any point after it
+      "unsettled"  unchanged across the rows (the date is the first row's)
     """
     rows = [r for r in rows if _cdx_time(r[0]) is not None]
     if len(rows) < 2:
-        return None, True
+        return None, True, "few"
     digests = [r[1] for r in rows]
     changes = sum(1 for a, b in zip(digests, digests[1:]) if a != b)
     if changes / (len(rows) - 1) > WAYBACK_MAX_CHURN:
-        return None, True
+        return None, True, "noise"
     newest = digests[-1]
     i = len(rows) - 1
     while i > 0 and digests[i - 1] == newest:
@@ -2298,11 +2347,13 @@ def wayback_change_from_captures(rows, now=None):
     # The current content also showing up earlier, apart from its own run, is
     # a page flipping between versions rather than one that changed.
     if newest in digests[:i]:
-        return None, True
+        return None, True, "noise"
     if (now is not None and i > 0
             and (now - _cdx_time(rows[i - 1][0])).days > WAYBACK_RECENT_CHANGE_DAYS):
-        return None, True
-    return _cdx_time(rows[i][0]), i > 0
+        return None, True, "stale"
+    if i == 0:
+        return _cdx_time(rows[0][0]), False, "unsettled"
+    return _cdx_time(rows[i][0]), True, None
 
 
 def _real_capture(row):
@@ -2330,25 +2381,6 @@ def _real_capture(row):
 WAYBACK_TEXT_MIN_WORDS      = 10  # distinct words that must differ to call it a change
 WAYBACK_TEXT_MIN_PAGE_WORDS = 30  # a capture with fewer is a stub, not the page
 WAYBACK_TEXT_FETCHES        = 6   # archived pages read per listing, at most
-
-
-def _hash_is_noise(rows):
-    """
-    True when the hashes cannot date a change: most captures carry a new one,
-    or the page returns to an earlier one. Most maintained pages look like this
-    in the archive, from a token in a form, a rotating banner or two versions
-    the server alternates between, so the text has to be compared instead.
-    """
-    digests = [r[1] for r in rows]
-    if len(digests) < 2:
-        return False
-    changes = sum(1 for a, b in zip(digests, digests[1:]) if a != b)
-    if changes / (len(digests) - 1) > WAYBACK_MAX_CHURN:
-        return True
-    i = len(digests) - 1
-    while i > 0 and digests[i - 1] == digests[-1]:
-        i -= 1
-    return digests[-1] in digests[:i]
 
 
 def _archived_words(ts, target):
@@ -2380,7 +2412,8 @@ def wayback_text_change(rows, target, now):
     earlier ones at growing steps back to the oldest, until one reads
     differently, then halving the gap. WAYBACK_TEXT_FETCHES caps the reads.
     """
-    recent = [r for r in rows if (now - _cdx_time(r[0])).days <= WAYBACK_RECENT_CHANGE_DAYS]
+    recent = [r for r in rows if _cdx_time(r[0]) is not None
+              and (now - _cdx_time(r[0])).days <= WAYBACK_RECENT_CHANGE_DAYS]
     if len(recent) < 2:
         return None
     budget = WAYBACK_TEXT_FETCHES
@@ -2448,12 +2481,12 @@ def wayback_change_date(url, now=None):
     if len(rows) < WAYBACK_MIN_CAPTURES:
         _log("    wayback  → too few captures of the page to judge")
         return None
-    dt, settled = wayback_change_from_captures(rows, now)
+    dt, settled, reason = wayback_change_from_captures(rows, now)
     # The text is compared only on a homepage. A deep page on an institution's
     # site carries the institution's news box, so its text changes with the
     # host's news, not with the listing. Deep pages keep to the hashes.
-    homepage = _path_prefix(urlunparse(p)) == ""
-    if dt is None and homepage and _hash_is_noise(rows):
+    homepage = _path_prefix(urlunparse(p)) == "" and not _identifying_query(p.query)
+    if reason == "noise" and homepage:
         dt = wayback_text_change(rows, target, now)
         if dt is None:
             _log("    wayback  → the page's text did not change within the year, "
@@ -2462,8 +2495,11 @@ def wayback_change_date(url, now=None):
         _log(f"    wayback  → text changed; current text first captured {dt:%Y-%m-%d}")
         return reject_future(dt)
     if dt is None:
-        _log("    wayback  → too few captures, "
-             "or the archive did not look for a year before the change")
+        _log({"few": "    wayback  → too few captures",
+              "noise": "    wayback  → the hash changes on most captures, and a deep "
+                       "page's text is not compared",
+              "stale": "    wayback  → the archive did not look for a year before "
+                       "the change"}.get(reason, "    wayback  → no date"))
         return None
     if not settled:
         # Unchanged across the whole window: the change is somewhere before
@@ -2810,6 +2846,9 @@ def website_alive_bonus(best_date, now):
 # Where "a while ago" stops meaning likely active. A project silent for longer
 # than this has to clear Possibly Inactive on other evidence.
 STALE_AFTER_DAYS = 548   # eighteen months
+# The sitemap's age limit is the same eighteen months, defined earlier only
+# because the sitemap code comes first in this file.
+assert SITEMAP_MAX_AGE_DAYS == STALE_AFTER_DAYS
 
 
 def recency_base_score(dt, now):
@@ -3152,7 +3191,10 @@ def score_project(project):
     project_site = url_class == "homepage" or (url_class == "article" and discovered_url)
     # A stale social post scores 0 and is no reason to stop looking.
     if (not any(c[0] > 0 for c in candidates) and website_url and project_site
-            and not page_closed and not is_archived and site_verdict in ("ok", "blocked")):
+            and not page_closed and not is_archived and site_verdict in ("ok", "blocked")
+            # A snapshot address dates the snapshot, not the project, whether
+            # or not the original still answers.
+            and not is_archive_host(raw_url) and not is_archive_host(website_url)):
         found = None
         if website_alive is True and site_verdict == "ok":
             found = sitemap_date(website_url, now)
