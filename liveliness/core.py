@@ -167,7 +167,12 @@ _GENERIC_NAME_WORDS = {
     "the", "a", "an", "of", "and", "for", "ai", "app", "apps", "project", "projects",
     "inc", "llc", "ltd", "org", "co", "com", "io", "net", "foundation", "initiative",
     "platform", "network", "lab", "labs", "hq", "online", "official", "website", "site",
+    "de", "la", "el", "des", "du", "und", "le", "les", "del", "da", "do", "in", "on", "to",
 }
+
+
+def _distinctive_words(text):
+    return " ".join(w for w in _norm_name(text).split() if w not in _GENERIC_NAME_WORDS)
 
 
 def _distinctive_name(name):
@@ -200,7 +205,9 @@ def _page_names_project(url):
         return False
     names = {name}
     for t in _page_titles(url):
-        title = " %s " % _norm_name(t)
+        # The same small words come out of the title, so "Code for America"
+        # matches its own title once "for" has gone from both.
+        title = " %s " % _distinctive_words(t)
         if any(" %s " % n in title for n in names):
             return True
     return False
@@ -218,14 +225,22 @@ _PARKED_TEXT = re.compile(
     r"domain has expired|renew (?:this|your) domain", re.I)
 
 
+PARKED_MAX_WORDS = 150   # visible words; a parking page has fewer
+
+
 def _looks_parked(listed, new):
     """True when a move lands on a parking or for-sale page."""
     host = _site_host(new)
     if any(host == h or host.endswith("." + h) for h in _PARKING_HOSTS):
         return True
     html = (_PAGE_CACHE.get(listed) or (None, None))[0] or ""
-    head = " ".join(_page_titles(listed)) + " " + re.sub(r"<[^>]+>", " ", html[:20_000])
-    return bool(_PARKED_TEXT.search(head))
+    # A parking page is a few lines. A real homepage that says "tickets for
+    # sale" somewhere is not one, so the wording counts only on a short page.
+    visible = re.sub(r"<(script|style)\b[\s\S]*?</\1\s*>", " ", html[:200_000], flags=re.I)
+    visible = re.sub(r"<[^>]+>", " ", visible)
+    if len(visible.split()) >= PARKED_MAX_WORDS:
+        return False
+    return bool(_PARKED_TEXT.search(" ".join(_page_titles(listed)) + " " + visible))
 
 
 def trusted_move(listed, new):
@@ -1914,14 +1929,16 @@ def latest_news_date(html, base_url, now):
 # A site that prints no date on its homepage often lists one for every page in
 # its sitemap. Read only when nothing else dated was found, since it costs up to
 # SITEMAP_MAX_FETCHES requests and a dated signal already found is better
-# evidence than a file most visitors never see.
+# evidence than a file visitors do not read.
 #
 # Two things make a sitemap date wrong, and both are guarded against. A sitemap
 # built on each request stamps every entry with the time of the request, which
 # is the same trap as the Last-Modified header, so the same two-day rule
-# applies. A sitemap rebuilt by a deploy stamps every entry with the build
-# time, which says a build ran rather than that anything on the site changed,
-# so a file whose entries all carry one identical stamp is ignored.
+# applies. A sitemap rebuilt by a deploy stamps entries with the build time,
+# which says a build ran rather than that anything on the site changed. Such a
+# pass (sitemap_newest_entry: one run of stamps on 80% of the entries, or one
+# day carrying 1,000 entries and half the file) is set aside as a publish and
+# scores like a change the archive saw, never like a page's own date.
 
 SITEMAP_PATHS           = ("/sitemap.xml", "/sitemap_index.xml", "/wp-sitemap.xml")
 SITEMAP_MAX_FETCHES     = 8     # robots.txt included
@@ -1937,7 +1954,8 @@ SITEMAP_BUILD_LABEL     = "Whole-site publish listed in the site's sitemap"
 class SitemapFind(NamedTuple):
     """
     (date, sitemap url, build) from sitemap_date(). build is True when the
-    only recent date is a pass that stamped most of the site at once: somebody
+    best date is a pass that stamped the site at once (a build pass, as
+    sitemap_newest_entry defines one): somebody
     published the site, which says it is kept up and no more, so it scores
     like a change the archive saw rather than like a page's own date.
     """
@@ -1948,10 +1966,10 @@ class SitemapFind(NamedTuple):
 # lastmod up to eighteen months old scores 40 as the site's own date, and the 5
 # a responding site earns brings that to 45, the foot of Likely Active. Older
 # dates would land a live site in Possibly Inactive or Inactive on the strength
-# of a file most visitors never see, so they count for nothing and the archive
+# of a file visitors do not read, so they count for nothing and the archive
 # is asked instead.
 SITEMAP_MAX_AGE_DAYS    = 548           # STALE_AFTER_DAYS; checked equal below it
-# A sitemap lists its newest entries last as often as first, and a plain
+# A sitemap can list its newest entries last, and a plain
 # urlset of 25,000 entries runs to a few megabytes, so it gets a larger cap
 # than a page. The deadline still bounds the read.
 SITEMAP_MAX_BYTES       = 10_000_000
@@ -2380,15 +2398,23 @@ def sitemap_date(url, now, deadline=None):
                     queue.append((child[1], child[0], depth + 1))
         builds = []
         found = sitemap_newest_entry(gathered, now, prefix, hosts, builds)
-        if found and (now - found[0]).days <= SITEMAP_MAX_AGE_DAYS:
-            # Reported as the file that carried the date, for the breakdown.
-            return SitemapFind(found[0], found[1] or final)
-        # A recent publish of the whole site is weaker than any page's own
-        # date, and stronger than nothing.
+        recent_build = None
         if builds:
             bdt, bsrc = max(builds, key=lambda b: b[0])
             if (now - bdt).days <= WAYBACK_RECENT_CHANGE_DAYS:
-                return SitemapFind(bdt, bsrc or final, build=True)
+                recent_build = SitemapFind(bdt, bsrc or final, build=True)
+        if found and (now - found[0]).days <= SITEMAP_MAX_AGE_DAYS:
+            # A page date 13 to 18 months old scores below a recent publish,
+            # so the publish is the better evidence then.
+            if (recent_build is not None and wayback_recency_score(recent_build.date, now)
+                    > page_recency_score(found[0], now)):
+                return recent_build
+            # Reported as the file that carried the date, for the breakdown.
+            return SitemapFind(found[0], found[1] or final)
+        # A recent publish of the whole site is weaker than a recent page date,
+        # and stronger than nothing.
+        if recent_build is not None:
+            return recent_build
     return None
 
 
@@ -2418,6 +2444,7 @@ WAYBACK_TIMEOUTS_TO_PAUSE = 2
 WAYBACK_MAX_CHURN     = 0.5     # share of captures with a new hash that means churn
 WAYBACK_MIN_LENGTH    = 400     # record bytes; smaller 200s are bot checks and stubs
 WAYBACK_RECENT_CHANGE_DAYS  = 365
+WAYBACK_LOOKBACK_DAYS       = 400   # captures asked for: the year, and a little before it
 WAYBACK_MIN_INTERVAL_S = 4
 WAYBACK_PAUSE_S       = 600
 WAYBACK_LABEL         = "Last content change seen by the Wayback Machine"
@@ -2561,7 +2588,7 @@ def _real_capture(row):
 
 WAYBACK_TEXT_MIN_WORDS      = 10  # distinct words that must differ to call it a change
 WAYBACK_TEXT_MIN_PAGE_WORDS = 30  # a capture with fewer is a stub, not the page
-WAYBACK_TEXT_FETCHES        = 4   # archived pages read per listing, at most
+WAYBACK_TEXT_FETCHES        = 5   # archived pages read per listing, at most
 
 
 def _archived_words(ts, target):
@@ -2599,12 +2626,14 @@ def wayback_text_change(rows, target, now, deadline=None):
     When the page's text last changed within the year, read from the archived
     pages themselves, or None.
 
-    At most WAYBACK_TEXT_FETCHES (four) archived pages are read, at four
-    seconds apart: the newest capture, the one nearest six months back, the
-    one nearest a year back if the six-month one still reads the same, and
-    one partner beside the capture that differs, to check that the earlier
-    text held. A carousel or feed that rewrites part of the page on every
-    capture changes all the time and dates nothing.
+    At most WAYBACK_TEXT_FETCHES (five) archived pages are read, four seconds
+    apart: the newest capture and the one before it, which must agree, so the
+    current text is settled; the capture nearest six months back, and the one
+    nearest a year back if the six-month one still reads the same; and the
+    capture beside the one that differs, which must agree with it, so the
+    earlier text held. The current text must also differ from every earlier
+    text read, so a page alternating between two versions dates nothing, and
+    so does a carousel or feed that rewrites part of the page on every capture.
 
     The date returned is the first capture after the last one read with the
     earlier text. No read pins the change closer than that, so the date is the
@@ -2612,28 +2641,47 @@ def wayback_text_change(rows, target, now, deadline=None):
     """
     recent = [r for r in rows if _cdx_time(r[0]) is not None
               and (now - _cdx_time(r[0])).days <= WAYBACK_RECENT_CHANGE_DAYS]
-    if len(recent) < 3:
+    if len(recent) < 4:
         return None
-    reads = [0]
+    reads, seen = [0], {}
 
     def read(i):
-        if reads[0] >= WAYBACK_TEXT_FETCHES or not _archive_time_left(deadline):
+        if i in seen:
+            return seen[i]
+        if reads[0] >= WAYBACK_TEXT_FETCHES:
+            _log("    wayback  → read limit reached before the text could be dated")
+            return None
+        if not _archive_time_left(deadline):
+            _log("    wayback  → no time left to read the archived page")
             return None
         reads[0] += 1
-        return _archived_words(recent[i][0], target)
+        seen[i] = _archived_words(recent[i][0], target)
+        if seen[i] is None:
+            _log(f"    wayback  → the capture of {recent[i][0][:8]} could not be read")
+        return seen[i]
 
-    def nearest(days):
-        """Index of the capture nearest `days` ago, never the newest."""
-        return min(range(len(recent) - 1),
+    def nearest(days, below):
+        """Index of the capture nearest `days` ago, older than index `below`."""
+        return min(range(below),
                    key=lambda k: abs((now - _cdx_time(recent[k][0])).days - days))
 
     newest = len(recent) - 1
     current = read(newest)
     if current is None:
         return None
+    settled = read(newest - 1)
+    if settled is None:
+        return None
+    if _text_differs(settled, current):
+        _log("    wayback  → the newest text is not settled yet; not dated")
+        return None
     diff = None
+    tried = set()
     for days in (182, WAYBACK_RECENT_CHANGE_DAYS):
-        k = nearest(days)
+        k = nearest(days, newest - 1)
+        if k in tried:
+            continue
+        tried.add(k)
         words = read(k)
         if words is None:
             return None
@@ -2644,16 +2692,22 @@ def wayback_text_change(rows, target, now, deadline=None):
         return None
     # The earlier text has to have held for two captures: the one before the
     # differing capture, or, at the start of the year, the one after it.
-    partner = diff - 1 if diff > 0 else (diff + 1 if diff + 1 < newest else None)
+    partner = diff - 1 if diff > 0 else (diff + 1 if diff + 1 < newest - 1 else None)
     if partner is None:
+        _log("    wayback  → no second capture of the earlier text within the year")
         return None
     partner_words = read(partner)
-    if partner_words is None or _text_differs(partner_words, diff_words):
+    if partner_words is None:
+        return None
+    if _text_differs(partner_words, diff_words):
         _log("    wayback  → the page's text changes on every capture; not dated")
         return None
-    last_old = max(diff, partner)
-    if last_old + 1 > newest:
+    # Every earlier text read must differ from the current one: a page that
+    # goes back to an earlier version is alternating, not changing.
+    if any(not _text_differs(w, current) for k, w in seen.items() if k <= max(diff, partner) and w):
+        _log("    wayback  → the page returns to an earlier text; not dated")
         return None
+    last_old = max(diff, partner)
     return _cdx_time(recent[last_old + 1][0])
 
 
@@ -2684,7 +2738,11 @@ def wayback_change_date(url, now=None, deadline=None):
     # Revisits (status "-") are kept: they say the content had not changed.
     base = {"url": target, "fl": "timestamp,digest,length,statuscode,mimetype",
             "filter": "!statuscode:[345].."}
-    rows = _cdx(dict(base, limit=-WAYBACK_FETCH_ROWS, fastLatest="true"))
+    # One capture a day over the last WAYBACK_LOOKBACK_DAYS, so a page captured
+    # many times a day still has captures six months and a year back in reach.
+    since = (now - timedelta(days=WAYBACK_LOOKBACK_DAYS)).strftime("%Y%m%d")
+    rows = _cdx(dict(base, limit=-WAYBACK_FETCH_ROWS, fastLatest="true",
+                     collapse="timestamp:8", **{"from": since}))
     if not rows:
         return None
     rows = sorted((r for r in rows if _real_capture(r)), key=lambda r: r[0])[-WAYBACK_WINDOW:]
@@ -3154,6 +3212,9 @@ def _without_unparseable_urls(project):
     return replace(project, website=website, repo=repo, feeds=feeds, links=links)
 
 
+LAST_RESORTS_S = 40   # sitemap and archive together, when the caller sets no budget
+
+
 def score_project(project, budget_s=None):
     """
     Runs all signal checks and returns:
@@ -3161,7 +3222,8 @@ def score_project(project, budget_s=None):
 
     budget_s, when given, is how many seconds the caller allows this project
     from now. The sitemap and the archive, which run last, stop asking once it
-    has passed. Without it they keep their own caps (SITEMAP_DEADLINE_S, and
+    has passed. Without it they share LAST_RESORTS_S between them, on top of
+    their own caps (SITEMAP_DEADLINE_S, and
     WAYBACK_TEXT_FETCHES archive reads at WAYBACK_MIN_INTERVAL_S apart).
     """
     global _PROJECT_NAME
@@ -3418,8 +3480,12 @@ def score_project(project, budget_s=None):
             # or not the original still answers.
             and not is_archive_host(raw_url) and not is_archive_host(website_url)):
         found = None
+        # The last resorts get the caller's budget, or LAST_RESORTS_S of their
+        # own when the caller gave none, so nothing can run past it unbounded.
+        stage = time.monotonic() + LAST_RESORTS_S
+        lr_deadline = deadline if deadline is not None else stage
         if website_alive is True and site_verdict == "ok":
-            found = sitemap_date(website_url, now, deadline=deadline)
+            found = sitemap_date(website_url, now, deadline=lr_deadline)
             if found:
                 if found.build:
                     candidates.append((wayback_recency_score(found[0], now), found[0],
@@ -3438,7 +3504,7 @@ def score_project(project, budget_s=None):
         # higher of the two wins as the strongest signal.
         sitemap_old = found and (now - found[0]).days > WAYBACK_RECENT_CHANGE_DAYS
         if (not found or sitemap_old) and not fresh_copyright and not js_shell:
-            changed = wayback_change_date(website_url, now, deadline=deadline)
+            changed = wayback_change_date(website_url, now, deadline=lr_deadline)
             if changed:
                 candidates.append((wayback_recency_score(changed, now), changed,
                                    WAYBACK_LABEL, WAYBACK))

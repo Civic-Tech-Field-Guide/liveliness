@@ -1565,4 +1565,111 @@ def test_score_project_always_passes_a_deadline(monkeypatch):
     monkeypatch.setattr(core, "sitemap_date", lambda u, now, deadline: got.append(deadline))
     monkeypatch.setattr(core, "wayback_change_date", lambda u, now, deadline: got.append(deadline))
     core.score_project(Project(name="x", website="https://x.org/"))
-    assert got == [None, None]
+    # With no budget, the last resorts get their own LAST_RESORTS_S.
+    assert len(got) == 2 and None not in got
+
+
+# ── Review of 073d209 ─────────────────────────────────────────────────────────
+
+def test_without_a_budget_the_last_resorts_get_forty_seconds(monkeypatch):
+    import time
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    got = []
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, deadline: got.append(deadline))
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now, deadline: got.append(deadline))
+    before = time.monotonic()
+    core.score_project(Project(name="x", website="https://x.org/"))
+    assert len(got) == 2 and all(d is not None for d in got)
+    assert all(before + 35 <= d <= time.monotonic() + 41 for d in got)
+
+
+def test_a_page_alternating_between_two_versions_dates_nothing(monkeypatch):
+    from liveliness import core
+    now = _now()
+    rows = _churny_rows(now)
+    monkeypatch.setattr(core, "_cdx", lambda params: rows)
+    a = {"word%d" % i for i in range(40)}
+    b = {"term%d" % i for i in range(40)}
+    order = [r[0] for r in rows]
+    # Stable for most of the year, then flipping between two versions at the end.
+    def words(ts, target):
+        i = order.index(ts)
+        return (b if i % 2 else a) if i >= 9 else a
+    monkeypatch.setattr(core, "_archived_words", words)
+    assert core.wayback_change_date("https://x.org/", now) is None
+
+
+def test_names_match_titles_with_their_small_words(monkeypatch):
+    from liveliness import core
+    for name, title in (("Code for America", "Code for America"),
+                        ("Bureau of Investigative Journalism", "The Bureau of Investigative Journalism (en-GB)")):
+        monkeypatch.setattr(core, "_PROJECT_NAME", name)
+        monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": ("<title>%s</title>" % title, {})})
+        monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://other.com/"})
+        assert core.landed_url("https://x.org/") == "https://other.com/", name
+
+
+def test_a_real_homepage_selling_tickets_is_not_parked(monkeypatch):
+    from liveliness import core
+    long_page = ("<title>Civic Widget</title><body>" + "<p>We build tools for neighbourhoods and city councils.</p>" * 40
+                 + "<p>Tickets for sale now for our spring summit.</p></body>")
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": (long_page, {})})
+    assert not core._looks_parked("https://x.org/", "https://www.x.org/")
+    short = "<title>x.org</title><body><p>This domain is for sale. Make an offer.</p><script>var a='" + "z" * 5000 + "';</script></body>"
+    monkeypatch.setattr(core, "_PAGE_CACHE", {"https://x.org/": (short, {})})
+    assert core._looks_parked("https://x.org/", "https://www.x.org/")
+
+
+def test_the_archive_is_asked_for_one_capture_a_day_over_the_last_400_days(monkeypatch):
+    from liveliness import core
+    asked = []
+    monkeypatch.setattr(core, "_cdx", lambda params: asked.append(params) or None)
+    core.wayback_change_date("https://x.org/", _now())
+    assert asked[0].get("collapse") == "timestamp:8"
+    assert asked[0].get("from") == "20251006"
+
+
+def test_a_recent_publish_beats_an_old_page_date(monkeypatch):
+    from datetime import timedelta
+    from liveliness import core
+    now = _now()
+    stamps = [(now - timedelta(days=20, seconds=-8 * i)).strftime("%Y-%m-%dT%H:%M:%SZ") for i in range(9)]
+    body = ('<urlset><url><loc>https://x.org/old</loc><lastmod>%s</lastmod></url>'
+            % (now - timedelta(days=450)).strftime("%Y-%m-%d") + "".join(
+        '<url><loc>https://x.org/p%d</loc><lastmod>%s</lastmod></url>' % (i, s)
+        for i, s in enumerate(stamps)) + '</urlset>')
+    _fake_web(monkeypatch, core, {"https://x.org/sitemap.xml": body})
+    found = core.sitemap_date("https://x.org/", now)
+    assert found is not None and found.build
+
+
+def test_the_same_capture_is_not_read_twice(monkeypatch):
+    from liveliness import core
+    now = _now()
+    rows = _churny_rows(now, n=4)   # captures 84, 63, 42 and 21 days ago
+    monkeypatch.setattr(core, "_cdx", lambda params: rows)
+    reads = []
+    same = {"word%d" % i for i in range(40)}
+    monkeypatch.setattr(core, "_archived_words", lambda ts, target: reads.append(ts) or same)
+    core.wayback_text_change(rows, "x.org/", now)
+    assert len(reads) == len(set(reads))
+
+
+def test_a_partner_that_cannot_be_read_says_why(monkeypatch):
+    from liveliness import core
+    now = _now()
+    rows = _churny_rows(now)
+    logged = []
+    monkeypatch.setattr(core, "_log", logged.append)
+    a = {"word%d" % i for i in range(40)}
+    b = {"term%d" % i for i in range(40)}
+    def words(ts, target):
+        i = [r[0] for r in rows].index(ts)
+        if i >= 9:
+            return b
+        return None if i in (4, 6, 2, 3, 5, 7) else a
+    monkeypatch.setattr(core, "_archived_words", words)
+    core.wayback_text_change(rows, "x.org/", now)
+    assert not any("changes on every capture" in m for m in logged)
+    assert any("could not be read" in m or "no time" in m or "read limit" in m for m in logged)
