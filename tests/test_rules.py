@@ -2787,7 +2787,8 @@ def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
             ("https://x.org/to-do/", "https://x.org/news/x-sunset/"),
             ("https://bigorg.org/ar-vr/about/", "https://bigorg.org/news/bigorg-sunset/"),
             ("https://x.org/2024-report", "https://x.org/news/report-sunset/"),
-            ("https://x.org/2024-report", "https://x.org/2024/05/report-sunset/"),
+            ("https://x.org/2024-impact-report", "https://x.org/news/impact-report-sunset/"),
+            ("https://x.org/projects/2024-widget", "https://x.org/2023/05/widget-sunset/"),
             ("https://x.org/2023-annual-report", "https://x.org/news/2024-annual-report-sunset/"),
             ("https://x.org/2023-annual-report/overview", "https://x.org/news/2024-annual-report-sunset/"),
             ("https://x.org/team/alice", "https://x.org/blog/alice-sunsetting/"),
@@ -2947,6 +2948,7 @@ def test_a_notice_address_keeps_a_page_naming_query():
     assert core._notice_address("https://x.org/?q=node/12") == "https://x.org/?q=node/12"
     assert core._notice_address("https://x.org/?q=node/12/secret") == "https://x.org/"
     assert core._notice_address("https://x.org/?p=1;lang=en") == "https://x.org/?p=1;lang=en"
+    assert core._notice_address("https://x.org/n/;jsessionid=abc?p=1") == "https://x.org/n/?p=1"
     assert core._notice_address("https://x.org/n/?id=8f3a2c-token") == "https://x.org/n/"
     assert core._notice_address("https://x.org/n/?lang=en;sid=abc123&id=99887766") == "https://x.org/n/?lang=en"
 

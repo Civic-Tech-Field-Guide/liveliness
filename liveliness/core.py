@@ -534,7 +534,8 @@ def _notice_address(url):
     # with nothing.
     separator = ";" if ";" in p.query and "&" not in p.query else "&"
     pairs = [pair for pair in re.split(r"[&;]", p.query) if pair and keep(pair)]
-    return p._replace(query=separator.join(pairs), fragment="").geturl()
+    # Path parameters (;jsessionid=) say who arrived, never which page.
+    return p._replace(params="", query=separator.join(pairs), fragment="").geturl()
 
 
 def sunset_landing(url, final, name=None):
@@ -661,14 +662,16 @@ def sunset_landing(url, final, name=None):
             # The notice's own segment, or a year folder right above it
             # (/news/2024/widget-sunset/); not a /2024/05/ date permalink.
             landed_years = re.findall(r"(?<!\d)(\d{4})(?!\d)", seg)
-            if i > 0 and re.fullmatch(r"\d{4}", segs[i - 1]):
-                landed_years.append(segs[i - 1])
+            # and a /YYYY/ or /YYYY/MM/(DD/) permalink above it.
+            for x in segs[max(0, i - 3):i]:
+                if re.fullmatch(r"\d{4}", x) and _is_year(x):
+                    landed_years.append(x)
             if listed_year and landed_years and listed_year.group(1) not in landed_years:
                 return False
             # An undated notice fits a dated listing unless the rest of its
-            # name is something that comes out every year (2024-report).
-            if listed_year and not landed_years and \
-                    _compact(_strip_date(product_seg)) in _RECURRING:
+            # name is something that comes out every year (2024-report, 2024-impact-report).
+            rest_words = [w for w in re.split(r"[^a-z0-9]+", _strip_date(product_seg).lower()) if w]
+            if listed_year and not landed_years and rest_words and rest_words[-1] in _RECURRING:
                 return False
             # A subject word before "shutdown" is the page's topic, unless it
             # is the listed product's own name and the page sits under a
