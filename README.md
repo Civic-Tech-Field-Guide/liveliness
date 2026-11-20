@@ -113,6 +113,8 @@ A footer copyright counts when it names this year or last year.
 
 The scorer looks for a closure notice in the first 3,000 characters of the page text, with wording such as "this project has ended" or "no longer accepting submissions". A closure dated in the future is ignored. Registration, applications, nominations, submissions or voting closing don't count, because active projects close those on a schedule.
 
+An organization that retires a product often points the product's old address at a notice announcing it, and that notice reads as a lively page with a recent date. The scorer counts a closure when the listed page redirects to a different page whose address both names the product and carries an ending word: sunset (or sunsets, sunsetted, sunsetting), shutdown, shut-down, discontinued, end-of-life or farewell, as a whole word in a path segment. `/widget/` sent to `/news/widget-sunset/` counts, and a campaign sent to `/internet-shutdown/` does not. A notice reached through a browser render, a meta refresh or a script is not caught.
+
 About one in ten reachable sites sends an empty shell and builds its text in the browser. A page with fewer than 200 characters of readable text is read again with a headless browser. If it still can't be read, it is recorded as unread, and its footer copyright doesn't count.
 
 ### Last resorts

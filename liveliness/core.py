@@ -249,6 +249,75 @@ def _removed_page(url, final):
     return any(_ERROR_SEGMENT.match(seg) for seg in landed.split("/") if seg)
 
 
+# A path segment that announces the end of the thing it replaced: the
+# shutdown notice an organization points a retired product's old address at.
+# Whole words inside a hyphenated or underscored segment, so
+# /privacy-not-included-sunset/ and /shutdown.php count and /sunsetboulevard,
+# /closed-captioning or /retired-teachers do not.
+_SUNSET_WORDS = r"(?:sunset|sunsets|sunsetted|sunsetting|shutdown|shut-down|discontinued|end-of-life|farewell)"
+_SUNSET_WORD = re.compile(r"(?:^|[-_])" + _SUNSET_WORDS + r"(?=[-_]|\.[a-z0-9]{1,5}$|$)", re.I)
+# Path words too common to tie a notice to one product.
+_GENERIC_SLUG_WORDS = {"www", "index", "html", "htm", "php", "news", "blog", "page", "pages",
+                       "the", "and", "for", "our", "project", "projects", "tool", "tools"}
+
+
+def _slug_tokens(path):
+    """The distinctive words of a path, plus each segment with its separators removed."""
+    out = set()
+    for seg in path.lower().split("/"):
+        seg = re.sub(r"\.[a-z0-9]{1,5}$", "", seg)
+        words = [w for w in re.split(r"[^a-z0-9]+", seg) if len(w) >= 3]
+        out.update(w for w in words if w not in _GENERIC_SLUG_WORDS)
+        if len("".join(words)) >= 4:
+            out.add("".join(words))
+    return out
+
+
+def sunset_landing(url, final):
+    """
+    The landed path when the listed page now redirects to a different page
+    whose address announces that this listing's product ended, or None.
+
+    A product an organization retires keeps its old address alive by pointing
+    it at a notice ("X has moved", "X has been sunset"). The notice answers
+    fine and carries a fresh publish date. It often sits on a site with a busy
+    news page and social accounts, which score as a lively project. Its
+    address is often the only part that says what it is.
+
+    Two things have to hold. The landed segment carries a shutdown word as a
+    whole word, and the rest of that segment names the listed product: a word
+    of the listed path, or the listed segment run together. The second test is
+    what tells /tool/ sent to /news/tool-sunset/ from a campaign sent to
+    /internet-shutdown/, where the word is the subject and not an ending. It
+    also stands in for trusted_move(), which this deliberately does not ask:
+    an organization that retires a product often announces it from a renamed
+    domain (foundation.mozilla.org to www.mozillafoundation.org), and a
+    registrar's or acquirer's farewell page will not repeat the product's name.
+
+    Only the redirect a plain fetch followed is seen. A page read through the
+    browser past a bot wall, or a notice reached by a meta refresh or a script,
+    leaves no landing address here and is not caught.
+    """
+    if not final or final == url or is_archive_host(final):
+        return None
+    listed = (urlparse(url).path or "").lower()
+    landed = urlparse(final).path or ""
+    if landed.rstrip("/").lower() == listed.rstrip("/"):
+        return None
+    if any(_SUNSET_WORD.search(seg) for seg in listed.split("/") if seg):
+        return None   # the listing itself is the notice: nothing changed
+    listed_tokens = _slug_tokens(listed)
+    if not listed_tokens:
+        return None   # a front page names no product to match
+    for seg in landed.split("/"):
+        if not seg or not _SUNSET_WORD.search(seg):
+            continue
+        rest = re.sub(r"(?:^|[-_])" + _SUNSET_WORDS + r"(?=[-_]|\.[a-z0-9]{1,5}$|$)", "", seg, flags=re.I)
+        if _slug_tokens(rest) & listed_tokens:
+            return landed
+    return None
+
+
 def landed_url(url, check_parked=True):
     """
     Where the listed page's own request ended up, or url itself. Only an
@@ -1430,6 +1499,17 @@ def closure_sentence(source, phrase, capped=""):
     phrase = phrase.replace('"', "\u201d")
     return ('%s it has finished ("%s"), so it is not scored on how recently '
             'that page changed%s' % (source, phrase, capped))
+
+
+# Its own wording, since the page itself was never read for it: only the
+# address the listing now redirects to.
+REDIRECT_CLOSURE_WORDING = "The listed address now redirects to a notice whose address says the project ended"
+
+
+def redirect_closure_sentence(path, capped=""):
+    """The breakdown line for a listing redirected to its own shutdown notice."""
+    return ('%s (%s), so it is not scored on how recently that notice changed%s'
+            % (REDIRECT_CLOSURE_WORDING, path, capped))
 
 
 WEBSITE_ALIVE_BONUS       = 15
@@ -3640,6 +3720,7 @@ def score_project(project, budget_s=None):
     page_copyright_year = None
     page_unreadable = False
     page_closed, page_closed_phrase = False, None
+    page_closed_source = "page"
     pending_adjudication = None
 
     # A site behind a bot wall answered 403 or 429, which is the wall talking
@@ -3715,6 +3796,11 @@ def score_project(project, budget_s=None):
                 candidates.append(Candidate(recency_base_score(news[0], now), news[0],
                                    "Newest item on the site's own news page", OWN))
             page_closed, page_closed_phrase = page_says_closed(page_html, now, text=rendered)
+            if not page_closed:
+                notice = sunset_landing(website_url, _PAGE_FINAL.get(website_url))
+                if notice:
+                    page_closed, page_closed_phrase = True, notice
+                    page_closed_source = "redirect"
             if page_closed:
                 _log(f"    page     → says it has closed: {page_closed_phrase!r}")
             elif not page_unreadable and not page_signals and not news:
@@ -3988,7 +4074,10 @@ def score_project(project, budget_s=None):
         before = score
         score  = min(score, CLOSED_CAP)
         capped = "" if score == before else " (capped at %g)" % CLOSED_CAP
-        why.append(closure_sentence(CLOSURE_SOURCE_WORDING, page_closed_phrase, capped))
+        if page_closed_source == "redirect":
+            why.append(redirect_closure_sentence(page_closed_phrase, capped))
+        else:
+            why.append(closure_sentence(CLOSURE_SOURCE_WORDING, page_closed_phrase, capped))
 
     # Fully unknown: nothing could be checked at all
     no_signals = (best_date is None and website_alive is None and accessible_count == 0)
