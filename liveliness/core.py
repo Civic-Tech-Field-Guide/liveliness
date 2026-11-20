@@ -264,7 +264,7 @@ def _removed_page(url, final):
 # farewell_widget), never sit inside it, where it is a subject
 # (government-shutdown-tracker) or a caption (2024-sunset-photos).
 _SUNSET_WORDS = (r"(?:sunsets?|sunsetted|sunsetting|shut[-_]?down|discontinued|"
-                 r"discontinuation|end[-_]of[-_]life|farewell)")
+                 r"discontinuation|end[-_]of[-_]life)")
 _EXT = r"(?:\.[a-z0-9]{1,5})?"
 # A notice slug may carry a date before the product or a year or notice word
 # after the ending word: 2024-widget-sunset, widget-sunset-2024.
@@ -282,7 +282,7 @@ _SUNSET_AT_START = re.compile(r"^" + _BEFORE + _SUNSET_START_WORDS + r"[-_](?P<r
 # in the landed path.
 _DOWNTIME = re.compile(r"(?:^|[-_/])(?:maintenance|planned|scheduled|outage|downtime|"
                        r"weekend|tonight|temporary|lapse|appropriations|furlough|"
-                       r"government|federal|usa|us)(?=[-_/.]|$)", re.I)
+                       r"government|federal)(?=[-_/.]|$)", re.I)
 # Function words dropped before the product is compared: farewell-to-the-widget.
 _FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
 _INDEX_FILE = re.compile(r"^(?:index|default|home)(?:\.[a-z0-9]{1,5})?$", re.I)
@@ -402,7 +402,8 @@ def sunset_landing(url, final, name=None):
             rest = m.group("rest")
             if _compact(rest) in _SHUTDOWN_SUBJECTS and _SHUTDOWN_WORD.search(seg):
                 return False
-            trimmed = re.sub(r"^" + _SUNSET_WORDS + r"[-_]|[-_]" + _SUNSET_WORDS + r"$", "",
+            trimmed = re.sub(r"^(?:" + _SUNSET_WORDS + r"|farewell(?:[-_]to)?)[-_]|[-_]"
+                             + _SUNSET_WORDS + r"$", "",
                              rest, flags=re.I)
             return _compact(rest) in products or _compact(trimmed) in products
         m = next((m for m in (_SUNSET_AT_END.match(seg), _SUNSET_AT_START.match(seg))
@@ -3435,10 +3436,11 @@ def render_page_text(url):
 # it would have been had no model existed, which is also what it keeps if the
 # pass is never run. Nothing in the public breakdown mentions a pending
 # reading, deliberately: a line saying a verdict is coming would sit on the
-# profile page forever if the pass never came. A listing that redirects to its
-# own shutdown notice (sunset_landing) is held at Unknown, and its breakdown
-# says why in terms of the notice, which stays true whether or not a reading
-# ever comes.
+# profile page forever if the pass never came. For a listing that redirects
+# to its own shutdown notice (sunset_landing), the scorer dates nothing from
+# the notice, its feeds or its social accounts, and the rules set no Status
+# while the reading is queued. The breakdown names the notice, which stays
+# true whether or not a reading ever comes.
 
 ADJUDICATE          = os.environ.get("ADJUDICATE", "1") != "0"
 ADJUDICATE_PAGE_CAP = 6000
@@ -4188,13 +4190,10 @@ def score_project(project, budget_s=None):
                        "their own")
 
     if notice:
-        held = (". The scorer sets no Status for it"
-                if not page_closed and not is_finished_work(project)
-                and pending_adjudication is not None else "")
         why.append("The listed address now redirects to %s, which reads as a shutdown "
                    "notice, so the scorer counts nothing dated on that page, and no "
                    "feed or social account, since those are usually the organization's%s" % (
-                       _notice_address(_PAGE_FINAL.get(website_url)) or notice, held))
+                       _notice_address(_PAGE_FINAL.get(website_url)) or notice, ""))
 
     # The page saying it has finished outranks everything above it, including a
     # recent launch: something added to the directory in March and closed in July
@@ -4350,8 +4349,8 @@ def score_project(project, budget_s=None):
         why = ["Nothing on this listing could be checked: no working website address, "
                "no code repository, no feed and no reachable social accounts."]
     elif undated and notice:
-        why.append("The notice is the only evidence about this project, and it is "
-                   "not scored. Reported as Unknown rather than scored.")
+        why.append("Nothing besides the notice was dated, and the scorer does not "
+                   "date a notice. Reported as Unknown rather than scored.")
     elif undated:
         why.append("Nothing dated was found in code, feeds or social posts, so there is "
                    "no evidence either way about whether this project is still running. "

@@ -2698,7 +2698,8 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://en.widget.org/", "https://foundation.org/news/widget-sunset/"),
             ("https://docs.widget.org/", "https://foundation.org/news/widget-sunset/"),
             ("https://x.org/tracker", "https://x.org/news/tracker-sunset/"),
-            ("https://x.org/widget", "https://x.org/news/widget-sunset/en-us/")):
+            ("https://x.org/widget", "https://x.org/news/widget-sunset/en-us/"),
+            ("https://x.org/widget", "https://x.org/news/widget-sunset/us/")):
         assert core.sunset_landing(listed, final), (listed, final)
 
 
@@ -2731,6 +2732,7 @@ def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
             ("https://x.org/team/alice", "https://x.org/blog/farewell-alice-team/"),
             ("https://x.org/civic/widget", "https://x.org/news/civic-sunset/"),
             ("https://x.org/tracker", "https://x.org/shutdown-tracker/"),
+            ("https://x.org/people/alice", "https://x.org/blog/alice-farewell/"),
             ("https://x.org/social-media", "https://x.org/social-media-shutdown/"),
             ("https://bigorg.org/ai/", "https://bigorg.org/news/bigorg-farewell/")):
         assert not core.sunset_landing(listed, final), (listed, final)
@@ -2803,7 +2805,7 @@ def test_a_notice_without_a_reading_says_so(monkeypatch):
     result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
     assert result["adjudication"] is None
     assert result["score"] is None
-    assert "sets no Status" not in result["breakdown"]
+    assert "Status" not in result["breakdown"]
     assert "https://x.org/news/widget-sunset/" in result["breakdown"]
 
 
