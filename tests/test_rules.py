@@ -2657,3 +2657,247 @@ def test_landed_url_takes_check_parked(monkeypatch):
     monkeypatch.setattr(core, "_PAGE_FINAL", {"https://x.org/": "https://www.x.org/"})
     assert core.landed_url("https://x.org/") == "https://x.org/"
     assert core.landed_url("https://x.org/", check_parked=False) == "https://www.x.org/"
+
+
+
+# ── A retired product's address pointed at its shutdown notice ────────────────
+
+def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
+    from liveliness import core
+    url = "https://foundation.mozilla.org/en/privacynotincluded/"
+    notice = "https://www.mozillafoundation.org/en/nothing-personal/privacy-not-included-sunset/"
+    assert core.sunset_landing(url, notice) == "/en/nothing-personal/privacy-not-included-sunset/"
+    for listed, final in (
+            ("https://x.org/foo", "https://x.org/news/foo-shutdown"),
+            ("https://x.org/foo", "https://x.org/blog/sunsetting_foo.html"),
+            ("https://x.org/foo", "https://x.org/foo_end_of_life/"),
+            ("https://x.org/foo", "https://x.org/farewell-to-foo/"),
+            ("https://x.org/foo", "https://x.org/foo-shutdown.php"),
+            ("https://x.org/widget/index.html", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/widget/en/", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/widget", "https://x.org/news/widget-sunset-2024/"),
+            ("https://x.org/widget", "https://x.org/news/2024-widget-sunset/"),
+            ("https://x.org/widget", "https://x.org/widget-shutdown-notice"),
+            ("https://x.org/outage-map", "https://x.org/news/outage-map-sunset/"),
+            ("https://x.org/2024-report", "https://x.org/2024-report-sunset/"),
+            ("https://x.org/Widget%20App", "https://x.org/widget-app-sunset/"),
+            ("https://x.org/widget", "https://x.org/widget-sunset-notice-2024/"),
+            ("https://widget.org/", "https://www.foundation.org/news/widget-sunset/"),
+            ("https://x.org/widget/app", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/sunset-park-tenants", "https://x.org/news/sunset-park-tenants-shutdown/"),
+            ("https://x.org/my-data/", "https://x.org/news/my-data-sunset/"),
+            ("https://x.org/widget/overview", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/widget", "https://x.org/blog/widget-sunset-2024-08-11/"),
+            ("https://widget.org/en/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.bigorg.org/", "https://bigorg.org/news/widget-sunset/"),
+            ("https://x.org/widget", "https://x.org/news/widget%2Dsunset/"),
+            ("https://x.org/widget", "https://x.org/news/farewell-widget-discontinued/"),
+            ("https://beta.widget.org/", "https://foundation.org/news/widget-sunset/"),
+            ("https://my.widget.org/", "https://foundation.org/news/widget-sunset/"),
+            ("https://en.widget.org/", "https://foundation.org/news/widget-sunset/"),
+            ("https://docs.widget.org/", "https://foundation.org/news/widget-sunset/"),
+            ("https://civic.widget.org/", "https://foundation.org/news/widget-sunset/"),
+            ("https://x.org/my-data/app", "https://x.org/news/my-data-sunset/"),
+            ("https://widget.org/en/about/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/pt-br/", "https://foundation.org/news/widget-sunset/"),
+            ("https://x.org/widget/about-us", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/socket.io", "https://x.org/news/socket-io-sunset/"),
+            ("https://x.org/projects/2024-widget", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/widget", "https://x.org/government/news/widget-sunset/"),
+            ("https://x.org/about/widget", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/map", "https://x.org/news/map-shutdown/"),
+            ("https://x.org/widget/v1", "https://x.org/news/widget-v1-sunset/"),
+            ("https://x.org/furlough-tracker", "https://x.org/news/furlough-tracker-sunset/"),
+            ("https://x.org/widget", "https://x.org/news/widget-shutdown%20notice"),
+            ("https://widget.en.bigorg.org/", "https://bigorg.org/news/widget-sunset/"),
+            ("https://x.org/tracker", "https://x.org/news/tracker-sunset/"),
+            ("https://x.org/widget", "https://x.org/news/widget-sunset/en-us/"),
+            ("https://x.org/widget", "https://x.org/news/widget-sunset/us/")):
+        assert core.sunset_landing(listed, final), (listed, final)
+
+
+def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
+    from liveliness import core
+    for listed, final in (
+            ("https://x.org/foo", "https://x.org/sunsetboulevard"),
+            ("https://x.org/foo", "https://x.org/closed-captioning"),
+            ("https://x.org/foo", "https://x.org/projects/foo"),
+            ("https://x.org/foo", "https://web.archive.org/web/2020/https://x.org/foo-sunset"),
+            ("https://x.org/foo", None),
+            ("https://x.org/foo", "https://x.org/foo"),
+            ("https://x.org/foo", "https://x.org/neighborhoods/sunset/"),
+            ("https://x.org/foo", "https://x.org/news/foo-shutdown-maintenance-weekend/"),
+            ("https://x.org/foo", "https://x.org/foo-shutdown/maintenance"),
+            ("https://x.org/tracker", "https://x.org/government-shutdown-tracker/"),
+            ("https://x.org/2024/report", "https://x.org/blog/2024-sunset-photos/"),
+            ("https://x.org/programs/widget", "https://x.org/blog/farewell-to-our-programs-team/"),
+            ("https://x.org/keepiton", "https://x.org/campaigns/internet-shutdown/"),
+            ("https://x.org/foo-sunset", "https://x.org/foo-sunset/"),
+            ("https://x.org/", "https://x.org/news/site-sunset/"),
+            ("https://x.org/internet", "https://x.org/internet-shutdown/"),
+            ("https://x.org/widget/about", "https://x.org/about-sunset/"),
+            ("https://x.org/p/12345", "https://x.org/12345-sunset/"),
+            ("https://x.org/en", "https://x.org/en-sunset"),
+            ("https://x.org/ai", "https://x.org/ai-sunset/"),
+            ("https://x.org/district", "https://x.org/sunset-district/"),
+            ("https://x.org/keepiton/", "https://x.org/keepiton-shutdowns/"),
+            ("https://widget.gov/", "https://widget.gov/widget-shutdown/lapse-in-appropriations"),
+            ("https://x.org/team/alice", "https://x.org/blog/farewell-alice-team/"),
+            ("https://x.org/civic/widget", "https://x.org/news/civic-sunset/"),
+            ("https://x.org/tracker", "https://x.org/shutdown-tracker/"),
+            ("https://x.org/people/alice", "https://x.org/blog/alice-farewell/"),
+            ("https://x.org/people/alice", "https://x.org/blog/farewell-to-alice/"),
+            ("https://agency.gov/widget", "https://agency.gov/lapse-in-appropriations/widget-shutdown/"),
+            ("https://x.org/widget", "https://x.org/maintenance/widget-shutdown/"),
+            ("https://x.org/widget", "https://x.org/news/widget-government-shutdown/"),
+            ("https://x.org/care", "https://x.org/services/end-of-life-care/"),
+            ("https://x.org/medications", "https://x.org/discontinued-medications/"),
+            ("https://x.org/tracker", "https://x.org/en/tracker-shutdown/"),
+            ("https://x.org/2023-annual-report", "https://x.org/news/2024-annual-report-sunset/"),
+            ("https://x.org/2023-annual-report/overview", "https://x.org/news/2024-annual-report-sunset/"),
+            ("https://x.org/team/alice", "https://x.org/blog/alice-sunsetting/"),
+            ("https://x.org/social-media", "https://x.org/social-media-shutdown/"),
+            ("https://bigorg.org/ai/", "https://bigorg.org/news/bigorg-farewell/")):
+        assert not core.sunset_landing(listed, final), (listed, final)
+
+
+def _notice_site(monkeypatch, core, landed):
+    _undated_live_site(monkeypatch, core)
+    page = ("<title>Widget has moved</title><p>Published Aug. 11, 2026</p>"
+            + "<p>We are continuing that work at our magazine.</p>" * 20 + "<p>© 2026</p>")
+    def fetch(u):
+        core._PAGE_FINAL[u] = landed
+        return page, {}
+    monkeypatch.setattr(core, "get_page_cached", fetch)
+    monkeypatch.setattr(core, "ADJUDICATE", True)
+    def never(*a, **k):
+        raise AssertionError("nothing on a notice dates the product")
+    monkeypatch.setattr(core, "latest_news_date", never)
+    monkeypatch.setattr(core, "page_date_signals", never)
+    monkeypatch.setattr(core, "discover_social_links", never)
+    monkeypatch.setattr(core, "sitemap_date", never)
+    monkeypatch.setattr(core, "wayback_change_date", never)
+    seen = []
+    monkeypatch.setattr(core, "latest_blog_date", lambda feeds, site, cls: seen.append(site))
+    return seen
+
+
+def test_a_shutdown_notice_dates_nothing_and_goes_to_a_reading(monkeypatch):
+    from liveliness import core
+    seen = _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
+    assert seen == []              # no feed read for a notice
+    assert result["adjudication"] and "has moved" in result["adjudication"]["text"]
+    assert result["status"] is None
+    assert "widget-sunset" in result["breakdown"]
+    assert "https://x.org/news/widget-sunset/" in result["breakdown"]
+    assert "reading" not in result["breakdown"]
+    assert result["adjudication"]["notice_url"] == "https://x.org/news/widget-sunset/"
+
+
+def test_a_notices_supplied_feed_and_accounts_are_not_counted(monkeypatch):
+    from liveliness import core
+    _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    def never(*a, **k):
+        raise AssertionError("an organization's feed or account does not date the product")
+    monkeypatch.setattr(core, "latest_blog_date", never)
+    monkeypatch.setattr(core, "check_social_recency", never)
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/",
+                                        feeds=["https://x.org/feed"],
+                                        links=[{"url": "https://bsky.app/profile/x.org", "type": "Bluesky"}]))
+    assert result["status"] is None and result["last_activity_date"] is None
+
+
+def test_a_notices_own_repository_still_counts(monkeypatch):
+    from liveliness import core
+    _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    monkeypatch.setattr(core, "latest_blog_date", lambda *a: None)
+    old = _now().replace(year=_now().year - 3)
+    monkeypatch.setattr(core, "check_github", lambda u: {"best_date": old, "archived": True,
+                                                         "dates": {"push": old}})
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/",
+                                        repo="https://github.com/x/widget"))
+    assert result["score"] is not None and result["last_activity_date"] is not None
+    assert result["status"] is None
+
+
+def test_a_notice_without_a_reading_says_so(monkeypatch):
+    from liveliness import core
+    _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    monkeypatch.setattr(core, "ADJUDICATE", False)
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
+    assert result["adjudication"] is None
+    assert result["score"] is None
+    assert "Status" not in result["breakdown"]
+    assert "https://x.org/news/widget-sunset/" in result["breakdown"]
+
+
+def test_an_ordinary_redirect_is_still_dated(monkeypatch):
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    calls = []
+    monkeypatch.setattr(core, "page_date_signals", lambda *a, **k: calls.append(1) or [])
+    def fetch(u):
+        core._PAGE_FINAL[u] = "https://x.org/projects/widget/"
+        return "<title>Widget</title>" + "<p>Widget helps cities.</p>" * 20, {}
+    monkeypatch.setattr(core, "get_page_cached", fetch)
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: None)
+    core.score_project(Project(name="Widget", website="https://x.org/tools/widget/"))
+    assert calls
+
+
+
+def test_a_listed_front_page_matches_on_the_listing_name():
+    from liveliness import core
+    assert core.sunset_landing("https://eddy-site.eu/", "https://org.eu/news/eddy-sunset/",
+                               "European Digital DemocracY network (EDDY)")
+    assert core.sunset_landing("https://getwidget.io/", "https://org.example/news/widget-sunset/", "Widget")
+    assert not core.sunset_landing("https://getwidget.io/", "https://org.example/news/widget-sunset/")
+
+
+def test_a_notice_that_says_it_ended_keeps_inactive(monkeypatch):
+    from liveliness import core
+    _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    monkeypatch.setattr(core, "page_says_closed", lambda *a, **k: (True, "this project has ended"))
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
+    # The closure settles it, as on any page that says so: nothing to queue.
+    assert result["adjudication"] is None
+    assert result["status"] == "Inactive" and result["score"] is not None
+
+
+def test_a_notice_with_nothing_else_dated_is_unknown(monkeypatch):
+    from liveliness import core
+    _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
+    assert result["score"] is None and result["activity_status"] == "Unknown"
+    assert result["last_activity_date"] is None
+
+
+
+def test_a_queued_notice_with_a_fresh_repo_gets_no_status(monkeypatch):
+    from liveliness import core
+    _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    monkeypatch.setattr(core, "latest_blog_date", lambda *a: None)
+    fresh = _now()
+    monkeypatch.setattr(core, "check_github", lambda u: {"best_date": fresh, "archived": False,
+                                                         "dates": {"push": fresh}})
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/",
+                                        repo="https://github.com/x/widget"))
+    assert result["score"] is not None
+    assert result["status"] is None and result["adjudication"]["status"] is None
+
+
+
+def test_an_unqueued_notice_still_gets_no_status(monkeypatch):
+    from liveliness import core
+    _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    monkeypatch.setattr(core, "ADJUDICATE", False)
+    monkeypatch.setattr(core, "latest_blog_date", lambda *a: None)
+    fresh = _now()
+    monkeypatch.setattr(core, "check_github", lambda u: {"best_date": fresh, "archived": False,
+                                                         "dates": {"push": fresh}})
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/",
+                                        repo="https://github.com/x/widget"))
+    assert result["adjudication"] is None and result["status"] is None
+    assert result["notice_url"] == "https://x.org/news/widget-sunset/"

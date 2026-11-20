@@ -37,7 +37,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 from html.parser import HTMLParser as _HTMLParser
-from urllib.parse import urljoin, parse_qs, parse_qsl, urlencode, urlparse
+from urllib.parse import urljoin, parse_qs, parse_qsl, urlencode, urlparse, unquote
 
 import requests
 import tldextract
@@ -247,6 +247,231 @@ def _removed_page(url, final):
     if _path_prefix(final) == "" or listed.startswith(landed + "/"):
         return True
     return any(_ERROR_SEGMENT.match(seg) for seg in landed.split("/") if seg)
+
+
+# ── A retired product's address pointed at its shutdown notice ────────────────
+#
+# An organization that retires a product often keeps the old address alive by
+# pointing it at a notice ("X has moved", "X has been sunset"). The notice loads
+# fine and carries a fresh publish date. It often sits on a busy site, whose
+# news page, feed and social accounts are the organization's, not the
+# product's. Read as the product's page, all of that scores a retired product
+# as lively. The scorer recognizes the notice by its address, counts nothing
+# dated on it, and queues it for a reading, where a person approves any
+# Inactive. No keyword list on its own is trusted to rule.
+
+# The ending word has to open or close the segment (widget-sunset,
+# farewell_widget), never sit inside it, where it is a subject
+# (government-shutdown-tracker) or a caption (2024-sunset-photos).
+_SUNSET_WORDS = (r"(?:sunsets?|sunsetted|sunsetting|shut[-_]?down|discontinued|"
+                 r"discontinuation|end[-_]of[-_]life)")
+_EXT = r"(?:\.[a-z0-9]{1,5})?"
+# A notice slug may carry a date before the product or a year or notice word
+# after the ending word: 2024-widget-sunset, widget-sunset-2024.
+_BEFORE = r"(?:\d{4}(?:[-_]\d{2}){0,2}[-_])?"
+_AFTER = r"(?:[-_](?:\d{4}(?:[-_]\d{2}){0,2}|notice|announcement))*"
+_SUNSET_AT_END = re.compile(r"^" + _BEFORE + r"(?P<rest>.+?)[-_]" + _SUNSET_WORDS + _AFTER + _EXT + r"$", re.I)
+# At the start of a segment the bare words are usually a subject: a place
+# (sunset-district), a tracker (shutdown-tracker), a party (farewell-party).
+# Only the forms that can only mean an ending count there, farewell-to-widget
+# among them; end-of-life-care and discontinued-medications are subjects.
+_SUNSET_START_WORDS = r"(?:sunsetted|sunsetting|farewell[-_]to)"
+_SUNSET_AT_START = re.compile(r"^" + _BEFORE + _SUNSET_START_WORDS + r"[-_](?P<rest>.+?)" + _AFTER + _EXT + r"$", re.I)
+# Words that make a shutdown a planned outage rather than an ending, anywhere
+# in the landed path.
+_DOWNTIME = re.compile(r"(?:^|[-_/])(?:maintenance|planned|scheduled|outage|downtime|"
+                       r"weekend|tonight|temporary|lapse|appropriations|furlough)(?=[-_/.]|$)", re.I)
+# A government shutdown names itself beside the word, in the same segment
+# (government-shutdown, federal-shutdown); /government/news/ is a section.
+_GOV_SHUTDOWN = re.compile(r"(?:government|federal)[-_]shut[-_]?down", re.I)
+_FUNDING_LAPSE = re.compile(r"(?:^|[-_/])(?:lapse|appropriations|furlough)(?=[-_/.]|$)", re.I)
+# Function words dropped before the product is compared: farewell-to-the-widget.
+_FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
+_INDEX_FILE = re.compile(r"^(?:index|default|home)(?:\.[a-z0-9]{1,5})?$", re.I)
+_DATE_PREFIX = re.compile(r"^" + _BEFORE)
+# Subjects that put "shutdown" at the end of a live page's address.
+_SHUTDOWN_SUBJECTS = {"internet", "mobile", "socialmedia", "network", "government",
+                      "tracker", "map", "data"}
+_SHUTDOWN_WORD = re.compile(r"[-_]shut[-_]?down" + _AFTER + _EXT + r"$", re.I)
+# Slugs too generic to name a product: a page about, or an id.
+_GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page", "pages",
+                     "project", "projects", "tool", "tools", "app", "apps", "index",
+                     "service", "services", "program", "programs", "site",
+                     "overview", "features", "docs", "documentation", "pricing",
+                     "dashboard", "login", "signin", "getstarted", "faq", "contact",
+                     "team", "people", "staff", "help", "support", "download", "downloads",
+                     "aboutus", "contactus", "whoweare", "ourwork", "work"}
+
+
+_WEB_EXT = re.compile(r"\.(?:html?|php|aspx?|jsp|cfm|pdf)$", re.I)
+
+
+def _compact(seg):
+    seg = _WEB_EXT.sub("", unquote(seg).lower())
+    return "".join(w for w in re.split(r"[^a-z0-9]+", seg) if w and w not in _FILLER)
+
+
+_SCRIPTS = {"hans", "hant", "latn", "cyrl", "arab", "deva", "jpan", "kore"}
+
+
+def _is_locale_segment(seg):
+    """A bare language code, or one with a two-letter region or a script: en, pt-br, zh-hant."""
+    m = re.fullmatch(r"([a-z]{2})(?:[-_]([a-z]{2}|[a-z]{4}))?", (seg or "").lower())
+    if not m or m.group(1) not in _LANGUAGE_CODES:
+        return False
+    tail = m.group(2)
+    return tail is None or len(tail) == 2 or tail in _SCRIPTS
+
+
+def _notice_address(url):
+    """A notice's address without its query string or fragment, for publishing."""
+    if not url:
+        return url
+    p = urlparse(url)
+    return p._replace(query="", fragment="").geturl()
+
+
+def sunset_landing(url, final, name=None):
+    """
+    The landed path when the listed page now redirects to a different page
+    whose address reads as this product's shutdown notice, or None.
+
+    The landed segment has to be the listed product's name with an ending word
+    at one end of it. The product's name is the listed path's last specific
+    segment, or its parent when the last one is generic, skipping a file name such as index.html, a language code such as
+    /en/, and a generic page such as /about/ or /app/. A front page, alone or
+    in one language, takes it from its registered domain (widget.org) or from
+    `name`, and from each label of its subdomain (civic.widget.org gives
+    civic and widget). A short section such as /ai/ names nothing. This stands in for trusted_move(), which it
+    deliberately does not ask: an organization that retires a product often
+    announces it from a renamed domain (foundation.mozilla.org to
+    www.mozillafoundation.org).
+
+    A match decides nothing on its own. score_project() stops counting the
+    notice's dates as the product's and queues the page for a reading. The
+    scorer sees only the path of the redirect a plain fetch followed, so it
+    misses a notice that a browser render, a meta refresh or a script reaches
+    (a site behind a bot wall among them), one served with an error status,
+    one named only in a query string or fragment, and one that splits the
+    product and the ending word across two segments (/widget/sunset/).
+    """
+    if not final or final == url or is_archive_host(final):
+        return None
+    landed = urlparse(final).path or ""
+    listed_path = urlparse(url).path or ""
+    if landed.rstrip("/").lower() == listed_path.rstrip("/").lower() and \
+            _registrable(urlparse(final).hostname) == _registrable(urlparse(url).hostname):
+        return None   # the listing itself is the notice: nothing moved
+    listed_segs = [seg for seg in listed_path.split("/") if seg]
+    # A locale is a bare language code or one with a real region or script
+    # (/en/, /pt-br/, /zh-hant/): my-data and it-help are product names.
+    named = [seg for seg in listed_segs
+             if not _INDEX_FILE.match(seg)
+             and not ((len(listed_segs) > 1 or len(seg) > 2) and _is_locale_segment(seg))]
+
+    def usable(p):
+        return len(p) >= 3 and not p.isdigit() and p not in _GENERIC_PRODUCTS
+
+    products = set()
+    # The last segment names the product. Its parent counts only when the last
+    # segment is generic (/widget/app): /team/alice is Alice, not the team.
+    product_seg = ""
+    path_product = ""
+    version = ""
+    for seg in reversed(named):
+        if re.fullmatch(r"v\d+(?:\.\d+)*", seg, re.I):
+            version = _compact(seg)
+            continue   # a version (/widget/v1) names the product above it
+        p = _compact(_DATE_PREFIX.sub("", unquote(seg)))
+        if usable(p):
+            products.add(p)
+            if version:
+                products.add(p + version)
+            product_seg = seg
+            path_product = p
+            break
+        if p not in _GENERIC_PRODUCTS:
+            break
+    # A front page, alone, in one language, or its about page (/en/about/).
+    front_page = all(_is_language_root("/" + seg) or _compact(seg) in _GENERIC_PRODUCTS
+                     for seg in named)
+    if not products and front_page:
+        # A listed front page, alone or in one language (/en/):
+        # the product is the site's own name, read from its registered domain
+        # (widget.org) or from the listing's name, with and without an acronym
+        # in parentheses ("European Digital DemocracY network (EDDY)").
+        host = (urlparse(url).hostname or "").lower()
+        label = (_registrable(host).split(".") or [""])[0]
+        # Both the subdomain (widget.bigorg.org) and the registered domain
+        # (widget.org behind civic.widget.org) can name the product, so both
+        # count; a generic or short subdomain (docs., my., en.) names nothing.
+        sub = host[: -len(_registrable(host))].rstrip(".")
+        sub = sub[4:] if sub.startswith("www.") else ("" if sub == "www" else sub)
+        # Every label of the subdomain is tried, past generic and locale ones
+        # (widget.en.bigorg.org).
+        skip = ("beta", "staging", "app", "dev", "test", "demo", "www2", "my", "go", "m")
+        sub_labels = [l for l in (sub.split(".") if sub else [])
+                      if l not in skip and not _is_locale_segment(l)]
+        title = name or ""
+        outside = re.sub(r"\([^)]*\)", " ", title)
+        inside = " ".join(re.findall(r"\(([^)]*)\)", title))
+        for p in [_compact(l) for l in sub_labels] + [_compact(label)]:
+            if usable(p):
+                products.add(p)
+        # A listing name is a weaker tie than an address, so a short common
+        # word ("Care", "Vote") names nothing; an acronym in parentheses does.
+        for p in (_compact(title), _compact(outside)):
+            if usable(p) and len(p) >= 5:
+                products.add(p)
+        if usable(_compact(inside)):
+            products.add(_compact(inside))
+    if not products:
+        return None
+    segs = [unquote(seg).replace(" ", "-") for seg in landed.split("/")]
+    for i, seg in enumerate(segs):
+        if not seg:
+            continue
+        # A slug can carry an ending word at both ends (farewell-widget-
+        # discontinued): the rest is compared with the other one trimmed too.
+        def rest_names_product(m):
+            rest = m.group("rest")
+            # A dated item only matches a notice for its own year: the 2023
+            # report is not the 2024 report. A notice with no year still counts.
+            listed_year = re.match(r"(\d{4})[-_]", product_seg)
+            landed_years = re.findall(r"(?<!\d)(\d{4})(?!\d)", seg)
+            if listed_year and landed_years and listed_year.group(1) not in landed_years:
+                return False
+            # A subject word before "shutdown" is the page's topic, unless it
+            # is the listed product's own name and the page sits under a
+            # section such as /news/ (/map sent to /news/map-shutdown/).
+            under_section = any(x and not _is_language_root("/" + x) for x in segs[:i])
+            if _compact(rest) in _SHUTDOWN_SUBJECTS and _SHUTDOWN_WORD.search(seg) \
+                    and not (_compact(rest) == path_product and under_section):
+                return False
+            trimmed = re.sub(r"^(?:" + _SUNSET_WORDS + r"|farewell(?:[-_]to)?)[-_]|[-_]"
+                             + _SUNSET_WORDS + r"$", "",
+                             rest, flags=re.I)
+            return _compact(rest) in products or _compact(trimmed) in products
+        m = next((m for m in (_SUNSET_AT_END.match(seg), _SUNSET_AT_START.match(seg))
+                  if m and rest_names_product(m)), None)
+        if not m:
+            continue
+        # A downtime word anywhere in the path outside the product's name marks
+        # an outage (/maintenance/widget-shutdown/). A section such as
+        # /planned-giving/ blocks a real notice too, a miss accepted for it.
+        around = "/".join([x for x in segs[:i] if not _is_language_root("/" + x)]
+                          + [seg.replace(m.group("rest"), "")]
+                          + [x for x in segs[i + 1:] if not _is_language_root("/" + x)])
+        # A funding lapse names itself anywhere in the path
+        # (/lapse-in-appropriations/widget-shutdown/).
+        if _DOWNTIME.search(around) or _FUNDING_LAPSE.search(around) or _GOV_SHUTDOWN.search(seg):
+            continue
+        # A match under a people section is a person leaving, not a product.
+        if any(
+                _compact(x) in ("team", "people", "staff") for x in listed_segs[:-1]):
+            continue
+        return landed
+    return None
 
 
 def landed_url(url, check_parked=True):
@@ -3264,7 +3489,11 @@ def render_page_text(url):
 # it would have been had no model existed, which is also what it keeps if the
 # pass is never run. Nothing in the public breakdown mentions a pending
 # reading, deliberately: a line saying a verdict is coming would sit on the
-# profile page forever if the pass never came.
+# profile page forever if the pass never came. For a listing that redirects
+# to its own shutdown notice (sunset_landing), the scorer dates nothing from
+# the notice, its feeds or its social accounts, and the rules set no Status
+# while the reading waits in the queue. The breakdown names the notice, which stays
+# true whether or not a reading ever comes.
 
 ADJUDICATE          = os.environ.get("ADJUDICATE", "1") != "0"
 ADJUDICATE_PAGE_CAP = 6000
@@ -3551,6 +3780,17 @@ def score_project(project, budget_s=None):
     # is_archived stays set only by check_website, for a Website URL that a
     # curator already pointed at an archive and whose original no longer answers.
 
+    # A listed page that now redirects to its own shutdown notice: nothing on
+    # that page, its feed or its social links is the product's, so none of it
+    # dates the product, and the page goes to a reading instead.
+    notice = None
+    if website_url and website_alive is True and url_class != "skip":
+        get_page_cached(website_url)
+        notice = sunset_landing(website_url, _PAGE_FINAL.get(website_url), name)
+        if notice:
+            _log(f"    website  → redirects to what looks like a shutdown notice: "
+                 f"{_notice_address(_PAGE_FINAL.get(website_url))}")
+
     # ── GitHub ───────────────────────────────────────────────────────────────
     gh = check_github(project.repo)
     github_date     = gh["best_date"] if gh else None
@@ -3566,7 +3806,10 @@ def score_project(project, budget_s=None):
     time.sleep(0.3)  # respect GitHub rate limits
 
     # ── Blog feeds ───────────────────────────────────────────────────────────
-    blog_date = latest_blog_date(project.feeds, website_url, url_class)
+    # On a notice the scorer drops the feeds too, supplied ones included: they are
+    # usually the organization's, still posting after the product ended. The
+    # product's own repository below still counts.
+    blog_date = None if notice else latest_blog_date(project.feeds, website_url, url_class)
     _log(f"    blog     → latest post: {blog_date}")
 
     # ── Social links: recency + accessibility ────────────────────────────────
@@ -3579,7 +3822,7 @@ def score_project(project, budget_s=None):
     _log(f"    links    → {len(link_items)} link(s) supplied")
 
     # Auto-discover social links from the website homepage
-    if website_url and url_class == "homepage":
+    if website_url and url_class == "homepage" and not notice:
         discovered_social = discover_social_links(website_url)
         if discovered_social:
             existing_domains = {_site_host(u) for u in all_social_urls}
@@ -3596,7 +3839,8 @@ def score_project(project, budget_s=None):
     accessible_count  = 0
     social_dated      = []  # list of (datetime, platform_label)
 
-    for url in all_social_urls:
+    # Social accounts go the same way on a notice, for the same reason.
+    for url in ([] if notice else all_social_urls):
         alive = check_url_alive(url)
         if alive is True:
             accessible_count += 1
@@ -3705,18 +3949,27 @@ def score_project(project, budget_s=None):
             if rendered and not page_unreadable:
                 # A shell the browser filled in: its words are the page's.
                 homepage_text = rendered
-            page_signals = page_date_signals(page_html, page_headers, now, text=rendered)
+            page_signals = [] if notice else page_date_signals(page_html, page_headers, now, text=rendered)
             if page_signals:
                 pdt, plabel = max(page_signals, key=lambda c: c[0])
                 candidates.append(Candidate(page_recency_score(pdt, now), pdt, plabel, OWN))
                 _log(f"    page     → {plabel}: {pdt:%Y-%m-%d}")
-            news = latest_news_date(page_html, website_url, now) if page_html else None
+            news = latest_news_date(page_html, website_url, now) if page_html and not notice else None
             if news:
                 candidates.append(Candidate(recency_base_score(news[0], now), news[0],
                                    "Newest item on the site's own news page", OWN))
             page_closed, page_closed_phrase = page_says_closed(page_html, now, text=rendered)
             if page_closed:
                 _log(f"    page     → says it has closed: {page_closed_phrase!r}")
+            if notice and not page_closed and not page_unreadable:
+                # A notice that also says it ended has its answer already: the
+                # closure's Inactive stands, as on any page that says so.
+                words = rendered if rendered is not None else readable
+                pending_adjudication = adjudication_candidate(name, website_url, words)
+                if pending_adjudication:
+                    _log(f"    page     → shutdown notice queued for reading")
+            elif page_closed:
+                pass
             elif not page_unreadable and not page_signals and not news:
                 # The wording check found nothing and neither did any date. This
                 # is the narrow band the rules cannot settle, so it is the only
@@ -3731,7 +3984,7 @@ def score_project(project, budget_s=None):
                     _log(f"    page     → nothing the rules can settle; queued for reading")
             if page_unreadable:
                 _log(f"    page     → still unread after rendering")
-            else:
+            elif not notice:
                 page_copyright_year = footer_copyright_year(page_html)
                 if page_copyright_year:
                     _log(f"    page     → footer copyright {page_copyright_year}")
@@ -3757,7 +4010,7 @@ def score_project(project, budget_s=None):
     # A listed homepage that itself reads as parked or for sale is not the
     # project's site, and its sitemap and archive would date the parking page.
     last_resorts = bool(
-        not recent_own and website_url and project_site
+        not recent_own and website_url and project_site and not notice
         and not page_closed and not is_archived and site_verdict in ("ok", "blocked")
         # A snapshot address dates the snapshot, not the project, whether
         # or not the original still answers.
@@ -3846,7 +4099,9 @@ def score_project(project, budget_s=None):
             why.append("The GitHub repository is archived, so however recent its last "
                        "activity is, it counts for at most 15")
     else:
-        why.append("No dated activity found in code, feeds, social posts or on the "
+        why.append(("No dated activity found in code (0)" if project.repo else
+                    "No code repository to date it (0)") if notice else
+                   "No dated activity found in code, feeds, social posts or on the "
                    "project's own page (0)")
 
     # Issue tracker responsiveness. A tiebreaker on the dated signals above,
@@ -3865,6 +4120,8 @@ def score_project(project, budget_s=None):
         score = min(score, 10)      # almost certainly dead if pointing to web archive
         why.append("The listed address is an archive snapshot and the original no "
                    "longer answers (score capped at 10)")
+    elif website_alive is True and notice:
+        pass   # the page that answered is the organization's notice, not the product
     elif website_alive is True:
         bonus  = website_alive_bonus(bonus_date, now)
         before = score
@@ -3962,6 +4219,10 @@ def score_project(project, budget_s=None):
     # March says nothing about a domain that stopped answering in August, and an
     # address that now resolves to an archive snapshot has already been capped
     # for exactly that reason — the floor would undo the cap.
+    if recent_launch and notice:
+        why.append("Added to the directory in the last nine months and marked as a "
+                   "launch, but its address now redirects to a shutdown notice")
+        recent_launch = False
     if recent_launch and (website_alive is False or is_archived):
         why.append("Added to the directory in the last nine months and marked as a "
                    "launch, but %s, which is the better evidence"
@@ -3980,6 +4241,13 @@ def score_project(project, budget_s=None):
             why.append("Added to the directory in the last nine months and marked as a "
                        "launch, but the signals found already score higher than that on "
                        "their own")
+
+    if notice:
+        why.append("The listed address now redirects to %s, which reads as a shutdown "
+                   "notice, so the scorer counts nothing dated on that page%s" % (
+                       _notice_address(_PAGE_FINAL.get(website_url)) or notice,
+                       ", and no feed or social account, since those are usually the "
+                       "organization's" if (project.feeds or all_social_urls) else ""))
 
     # The page saying it has finished outranks everything above it, including a
     # recent launch: something added to the directory in March and closed in July
@@ -4015,6 +4283,12 @@ def score_project(project, budget_s=None):
     # rests on them alone can read Active, but it is not the confidence the
     # Status field asks for, so Status is left alone.
     if status == "Active" and winner is not None and not winner.own:
+        status = None
+    # A listing whose address now redirects to its shutdown notice gets no
+    # Status from the rules, queued or not: a fresh commit says the code moved,
+    # not that the product runs, and only a person reading the notice can say
+    # what it means.
+    if notice and not page_closed and status in ("Active", "Inactive"):
         status = None
 
     # A finished piece of work is N/A, and it outranks anything the signals say.
@@ -4092,6 +4366,10 @@ def score_project(project, budget_s=None):
             # Total are both answers to questions a closure re-opens, and a
             # rebuilt breakdown wants them written fresh rather than stripped.
             "reasons":                list(why),
+            # The full address the listing now redirects to, when it reads as
+            # the product's shutdown notice. The Field Guide's review step
+            # shows it, and sends the page to a person whatever the reading.
+            "notice_url":             _notice_address(_PAGE_FINAL.get(website_url)) if notice else None,
             "closed_score":           None if no_signals else closed_score,
             "closed_activity_status": "Unknown" if no_signals
                                       else score_to_activity_status(closed_score),
@@ -4123,6 +4401,9 @@ def score_project(project, budget_s=None):
     elif no_signals:
         why = ["Nothing on this listing could be checked: no working website address, "
                "no code repository, no feed and no reachable social accounts."]
+    elif undated and notice:
+        why.append("The scorer found nothing dated besides the notice, and it does not "
+                   "date a notice. Reported as Unknown rather than scored.")
     elif undated:
         why.append("Nothing dated was found in code, feeds or social posts, so there is "
                    "no evidence either way about whether this project is still running. "
@@ -4146,4 +4427,8 @@ def score_project(project, budget_s=None):
         "breakdown":          breakdown,
         "discovered_url":     discovered_url,
         "adjudication":       pending_adjudication,
+        # Set when the listed address redirects to the product's own shutdown
+        # notice, so a caller that settles an Unknown from somewhere else (a
+        # parent organization's score) can leave this one alone.
+        "notice_url":         _notice_address(_PAGE_FINAL.get(website_url)) if notice else None,
     }
