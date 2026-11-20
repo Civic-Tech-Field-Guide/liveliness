@@ -2702,10 +2702,47 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://widget.org/pt-br/", "https://foundation.org/news/widget-sunset/"),
             ("https://x.org/widget/about-us", "https://x.org/news/widget-sunset/"),
             ("https://x.org/socket.io", "https://x.org/news/socket-io-sunset/"),
-            ("https://x.org/projects/2024-widget", "https://x.org/news/widget-sunset/"),
             ("https://x.org/widget", "https://x.org/government/news/widget-sunset/"),
             ("https://x.org/about/widget", "https://x.org/news/widget-sunset/"),
             ("https://x.org/map", "https://x.org/news/map-shutdown/"),
+            ("https://x.org/ar-vr/", "https://x.org/news/ar-vr-sunset/"),
+            ("https://widget.org/en-ie/about/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/en-nz/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/app/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/en-eu/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/it-it/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/es-ar/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/es-419/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/sr-latn-rs/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/en-uk/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/zh-cn/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/es-la/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/en-sa/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/lo-la/", "https://foundation.org/news/widget-sunset/"),
+            ("https://x.org/widget/resources/", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/news/widget/news/", "https://x.org/blog/widget-sunset/"),
+            ("https://x.org/widget/download", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/widget/blog/", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/projects/2024-widget", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/projects/2024-widget", "https://x.org/2025/01/widget-sunset/"),
+            ("https://x.org/2024-widget", "https://x.org/news/widget-sunset-1000/"),
+            ("https://x.org/a-team/", "https://x.org/news/a-team-sunset/"),
+            ("https://x.org/2024-report", "https://x.org/news/2024/report-sunset/"),
+            ("https://widget.org/en-emea/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/ca-en/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/fr-int/", "https://foundation.org/news/widget-sunset/"),
+            ("https://x.org/2025-widget", "https://x.org/news/2024-25-widget-sunset/"),
+            ("https://x.org/2024-widget", "https://x.org/news/2025-01-15-widget-sunset/"),
+            ("https://x.org/to-do/resources/", "https://x.org/news/to-do-sunset/"),
+            ("https://x.org/widget/2024/news/", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/widget/news/2024/", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/for-the-people/", "https://x.org/news/for-the-people-sunset/"),
+            ("https://events.bigorg.org/", "https://bigorg.org/news/events-sunset/"),
+            ("https://x.org/to-do/", "https://x.org/news/to-do-sunset/"),
+            ("https://x.org/2090-agenda", "https://x.org/news/2090-agenda-sunset/"),
+            ("https://widget.org/docs/", "https://foundation.org/news/widget-sunset/"),
+            ("https://x.org/projects/2024-widget", "https://x.org/news/2024/widget-sunset/"),
+            ("https://x.org/projects/2024-widget", "https://x.org/news/2024-widget-sunset/"),
             ("https://x.org/widget/v1", "https://x.org/news/widget-v1-sunset/"),
             ("https://x.org/furlough-tracker", "https://x.org/news/furlough-tracker-sunset/"),
             ("https://x.org/widget", "https://x.org/news/widget-shutdown%20notice"),
@@ -2753,6 +2790,23 @@ def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
             ("https://x.org/care", "https://x.org/services/end-of-life-care/"),
             ("https://x.org/medications", "https://x.org/discontinued-medications/"),
             ("https://x.org/tracker", "https://x.org/en/tracker-shutdown/"),
+            ("https://bigorg.org/ar-vr/", "https://bigorg.org/news/bigorg-sunset/"),
+            ("https://bigorg.org/news/", "https://bigorg.org/news/bigorg-sunset/"),
+            ("https://bigorg.org/tools/", "https://bigorg.org/news/bigorg-sunset/"),
+            ("https://bigorg.org/our-work/", "https://bigorg.org/news/bigorg-sunset/"),
+            ("https://bigorg.org/apps/", "https://bigorg.org/news/bigorg-sunset/"),
+            ("https://bigorg.org/our-tools/", "https://bigorg.org/news/our-tools-sunset/"),
+            ("https://bigorg.org/resources/", "https://bigorg.org/news/resources-sunset/"),
+            ("https://x.org/2090-agenda", "https://x.org/news/agenda-sunset/"),
+            ("https://x.org/to-do/", "https://x.org/news/x-sunset/"),
+            ("https://bigorg.org/ar-vr/about/", "https://bigorg.org/news/bigorg-sunset/"),
+            ("https://x.org/2024-report", "https://x.org/news/report-sunset/"),
+            ("https://x.org/2024-impact-report", "https://x.org/news/impact-report-sunset/"),
+            ("https://x.org/2024-report.pdf", "https://x.org/news/report-sunset/"),
+            ("https://x.org/2024-reports", "https://x.org/news/reports-sunset/"),
+            ("https://x.org/2024-indexes", "https://x.org/news/indexes-sunset/"),
+            ("https://x.org/projects/2024-widget", "https://x.org/2023/05/widget-sunset/"),
+            ("https://x.org/2024-widget", "https://x.org/2023/05/2024-widget-sunset/"),
             ("https://x.org/2023-annual-report", "https://x.org/news/2024-annual-report-sunset/"),
             ("https://x.org/2023-annual-report/overview", "https://x.org/news/2024-annual-report-sunset/"),
             ("https://x.org/team/alice", "https://x.org/blog/alice-sunsetting/"),
@@ -2901,3 +2955,41 @@ def test_an_unqueued_notice_still_gets_no_status(monkeypatch):
                                         repo="https://github.com/x/widget"))
     assert result["adjudication"] is None and result["status"] is None
     assert result["notice_url"] == "https://x.org/news/widget-sunset/"
+
+
+def test_a_notice_address_keeps_a_page_naming_query():
+    from liveliness import core
+    assert core._notice_address("https://x.org/?p=101&utm_source=r#top") == "https://x.org/?p=101"
+    assert core._notice_address("https://x.org/a/?utm_source=r&_hsenc=x") == "https://x.org/a/"
+    assert core._notice_address("https://x.org/n/?sessionid=abc&email=j%40x.org&ref=tw") == "https://x.org/n/"
+    assert core._notice_address("https://x.org/?page_id=7&lang=pt%2Dbr") == "https://x.org/?page_id=7&lang=pt%2Dbr"
+    assert core._notice_address("https://x.org/?q=node/12") == "https://x.org/?q=node/12"
+    assert core._notice_address("https://x.org/?q=node/12/secret") == "https://x.org/"
+    assert core._notice_address("https://x.org/?p=1;lang=en") == "https://x.org/?p=1;lang=en"
+    assert core._notice_address("https://x.org/n/;jsessionid=abc?p=1") == "https://x.org/n/?p=1"
+    assert core._notice_address("https://x.org/a;jsessionid=x/b/?p=1") == "https://x.org/a/b/?p=1"
+    assert core._notice_address("https://u:pw@x.org/n?p=1") == "https://x.org/n?p=1"
+    assert core._notice_address("https://x.org/?P=101") == "https://x.org/"
+    assert core._notice_address("https://x.org/n/?id=8f3a2c-token") == "https://x.org/n/"
+    # With an & present the server reads ;sid= as part of lang's value, so the
+    # whole pair goes.
+    assert core._notice_address("https://x.org/n/?lang=en;sid=abc123&id=99887766") == "https://x.org/n/"
+    assert core._notice_address("https://x.org/?p=1;lang=en&x=1&page_id=2") == "https://x.org/?page_id=2"
+
+
+def test_locales_follow_bcp47_codes():
+    from liveliness import core
+    for seg in ("en", "pt-br", "it-it", "es-419", "zh-hant", "sr-latn-rs", "en_GB", "en-uk",
+                "en-eu", "zh-chs", "zh-tw", "fr-ca", "en-sa", "en-mx", "lo-la", "es-la"):
+        assert core._is_locale_segment(seg), seg
+    for seg in ("ar-vr", "my-data", "it-help", "en-xx", "zz", "zh-abcd", "en-aa", "fr-zzzz",
+                "to-do", "my-id", "is-it", "my-ai", "pi-ai", "sr-ai", "ca-valencia", "pt-2030",
+                "en-2024", "ar-15"):
+        assert not core._is_locale_segment(seg), seg
+
+
+
+def test_the_locale_table_holds_whole_tags():
+    from liveliness import core
+    assert not any(t.endswith("-") for t in core._CLDR_LOCALES)
+    assert {"zh-cn", "uk-ua", "be-by"} <= core._CLDR_LOCALES

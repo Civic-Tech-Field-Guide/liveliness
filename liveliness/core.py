@@ -284,15 +284,38 @@ _DOWNTIME = re.compile(r"(?:^|[-_/])(?:maintenance|planned|scheduled|outage|down
 # A government shutdown names itself beside the word, in the same segment
 # (government-shutdown, federal-shutdown); /government/news/ is a section.
 _GOV_SHUTDOWN = re.compile(r"(?:government|federal)[-_]shut[-_]?down", re.I)
-_FUNDING_LAPSE = re.compile(r"(?:^|[-_/])(?:lapse|appropriations|furlough)(?=[-_/.]|$)", re.I)
+# Things that come out every year, so a dated one is that year's edition.
+_RECURRING = {"report", "annualreport", "survey", "agenda", "conference", "summit",
+              "review", "plan", "budget", "strategy", "index", "census", "festival"}
 # Function words dropped before the product is compared: farewell-to-the-widget.
 _FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
 _INDEX_FILE = re.compile(r"^(?:index|default|home)(?:\.[a-z0-9]{1,5})?$", re.I)
-_DATE_PREFIX = re.compile(r"^" + _BEFORE)
+# A year, optionally a month and day (2024-05-, 2024-05-01-), or a school or
+# fiscal year (2024-25-).
+_DATE_PREFIX = re.compile(r"^(\d{4})(?:[-_](?:0[1-9]|1[0-2])(?:[-_](?:0[1-9]|[12]\d|3[01]))?"
+                          r"|[-_]\d{2})?[-_]")
+
+
+def _is_year(text):
+    """A four-digit number a listing could date from: 1990 to next year."""
+    return text.isdigit() and 1990 <= int(text) <= datetime.now().year + 1
+
+
+def _strip_date(seg):
+    """A leading date taken off a slug (2024-widget), but not a number in a name (2090-agenda)."""
+    m = _DATE_PREFIX.match(seg)
+    return seg[m.end():] if m and _is_year(m.group(1)) else seg
 # Subjects that put "shutdown" at the end of a live page's address.
 _SHUTDOWN_SUBJECTS = {"internet", "mobile", "socialmedia", "network", "government",
                       "tracker", "map", "data"}
 _SHUTDOWN_WORD = re.compile(r"[-_]shut[-_]?down" + _AFTER + _EXT + r"$", re.I)
+# Section pages that hold many things, so a listing there is not the site's
+# own front page: /news/, /tools/, /projects/.
+_SECTIONS = {"news", "blog", "tools", "tool", "projects", "project", "programs",
+             "program", "programmes", "services", "service", "pages", "page", "data",
+             "internet", "team", "people", "staff", "work", "ourwork", "apps",
+             "features", "downloads", "download", "resources", "events",
+             "initiatives", "products", "solutions"}
 # Slugs too generic to name a product: a page about, or an id.
 _GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page", "pages",
                      "project", "projects", "tool", "tools", "app", "apps", "index",
@@ -306,29 +329,235 @@ _GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page"
 _WEB_EXT = re.compile(r"\.(?:html?|php|aspx?|jsp|cfm|pdf)$", re.I)
 
 
-def _compact(seg):
+def _compact(seg, drop_filler=True):
     seg = _WEB_EXT.sub("", unquote(seg).lower())
-    return "".join(w for w in re.split(r"[^a-z0-9]+", seg) if w and w not in _FILLER)
+    return "".join(w for w in re.split(r"[^a-z0-9]+", seg)
+                   if w and not (drop_filler and w in _FILLER))
 
 
-_SCRIPTS = {"hans", "hant", "latn", "cyrl", "arab", "deva", "jpan", "kore"}
+# Locales as BCP 47 tags (RFC 5646), the form browsers, CMSs and sitemaps use
+# in an address. A bare language counts when it is ISO 639-1
+# (_LANGUAGE_CODES). A tag with a script or region counts only when it is a
+# locale the Unicode CLDR knows, so a real language and a real region that
+# happen to spell a word (to-do, my-id, is-it) stay names. The table is CLDR
+# 49's available locales plus its likely subtags, so the default regions it
+# leaves implicit (pt-br, it-it, en-us) are in; scripts/cldr_locales.py
+# regenerates it.
+_CLDR_LOCALES = frozenset("""
+aa-et aa-latn aa-latn-et ab-cyrl ab-cyrl-ge ab-ge ae-avst ae-avst-ir ae-ir af-latn
+af-latn-za af-na af-za ak-gh ak-latn ak-latn-gh am-et am-ethi am-ethi-et an-es
+an-latn an-latn-es ar-ae ar-arab ar-arab-eg ar-bh ar-dj ar-dz ar-eg ar-eh ar-er
+ar-il ar-iq ar-jo ar-km ar-kw ar-lb ar-ly ar-ma ar-mr ar-om ar-ps ar-qa ar-sa ar-sd
+ar-so ar-ss ar-sy ar-td ar-tn ar-ye as-beng as-beng-in as-in av-cyrl av-cyrl-ru
+av-ru ay-bo ay-latn ay-latn-bo az-arab az-arab-az az-arab-iq az-arab-ir az-az
+az-cyrl az-cyrl-az az-cyrl-ru az-iq az-ir az-latn az-latn-az az-ru ba-cyrl
+ba-cyrl-ru ba-ru be-by be-cyrl be-cyrl-by be-tarask bg-bg bg-cyrl bg-cyrl-bg bi-latn
+bi-latn-vu bi-vu bm-latn bm-latn-ml bm-ml bn-bd bn-beng bn-beng-bd bn-in bo-cn bo-in
+bo-tibt bo-tibt-cn br-fr br-latn br-latn-fr bs-ba bs-cyrl bs-cyrl-ba bs-latn
+bs-latn-ba ca-ad ca-es ca-es-valencia ca-fr ca-it ca-latn ca-latn-es ce-cyrl
+ce-cyrl-ru ce-ru ch-gu ch-latn ch-latn-gu co-fr co-latn co-latn-fr cr-ca cr-cans
+cr-cans-ca cs-cz cs-latn cs-latn-cz cu-bg cu-cyrl cu-cyrl-ru cu-glag cu-glag-bg
+cu-glag-ru cu-ru cv-cyrl cv-cyrl-ru cv-ru cy-gb cy-latn cy-latn-gb da-dk da-gl
+da-latn da-latn-dk de-at de-be de-ch de-de de-it de-latn de-latn-de de-li de-lu
+dv-mv dv-thaa dv-thaa-mv dz-bt dz-tibt dz-tibt-bt ee-gh ee-latn ee-latn-gh ee-tg
+el-cy el-gr el-grek el-grek-gr el-polyton en-001 en-150 en-ae en-ag en-ai en-as
+en-at en-au en-bb en-be en-bi en-bm en-bs en-bw en-bz en-ca en-cc en-ch en-ck en-cm
+en-cx en-cy en-cz en-de en-dg en-dk en-dm en-ee en-er en-es en-fi en-fj en-fk en-fm
+en-fr en-gb en-gd en-ge en-gg en-gh en-gi en-gm en-gs en-gu en-gy en-hk en-hu en-id
+en-ie en-il en-im en-in en-io en-it en-je en-jm en-jp en-ke en-ki en-kn en-ky
+en-latn en-latn-us en-lc en-lr en-ls en-lt en-lv en-mg en-mh en-mo en-mp en-ms en-mt
+en-mu en-mv en-mw en-my en-na en-nf en-ng en-nl en-no en-nr en-nu en-nz en-pg en-ph
+en-pk en-pl en-pn en-pr en-pt en-pw en-ro en-rw en-sb en-sc en-sd en-se en-sg en-sh
+en-shaw en-shaw-gb en-shaw-us en-si en-sk en-sl en-ss en-sx en-sz en-tc en-tk en-to
+en-tt en-tv en-tz en-ua en-ug en-um en-us en-vc en-vg en-vi en-vu en-ws en-za en-zm
+en-zw eo-001 eo-latn eo-latn-001 es-419 es-ar es-bo es-br es-bz es-cl es-co es-cr
+es-cu es-do es-ea es-ec es-es es-gq es-gt es-hn es-ic es-latn es-latn-es es-mx es-ni
+es-pa es-pe es-ph es-pr es-py es-sv es-us es-uy es-ve et-ee et-latn et-latn-ee eu-es
+eu-latn eu-latn-es fa-af fa-arab fa-arab-ir fa-ir ff-adlm ff-adlm-bf ff-adlm-cm
+ff-adlm-gh ff-adlm-gm ff-adlm-gn ff-adlm-gw ff-adlm-lr ff-adlm-mr ff-adlm-ne
+ff-adlm-ng ff-adlm-sl ff-adlm-sn ff-bf ff-cm ff-gh ff-gm ff-gn ff-gw ff-latn
+ff-latn-bf ff-latn-cm ff-latn-gh ff-latn-gm ff-latn-gn ff-latn-gw ff-latn-lr
+ff-latn-mr ff-latn-ne ff-latn-ng ff-latn-sl ff-latn-sn ff-lr ff-mr ff-ne ff-ng ff-sl
+ff-sn fi-fi fi-latn fi-latn-fi fj-fj fj-latn fj-latn-fj fo-dk fo-fo fo-latn
+fo-latn-fo fr-be fr-bf fr-bi fr-bj fr-bl fr-ca fr-cd fr-cf fr-cg fr-ch fr-ci fr-cm
+fr-dj fr-dz fr-fr fr-ga fr-gf fr-gn fr-gp fr-gq fr-ht fr-km fr-latn fr-latn-fr fr-lu
+fr-ma fr-mc fr-mf fr-mg fr-ml fr-mq fr-mr fr-mu fr-nc fr-ne fr-pf fr-pm fr-re fr-rw
+fr-sc fr-sn fr-sy fr-td fr-tg fr-tn fr-vu fr-wf fr-yt fy-latn fy-latn-nl fy-nl ga-gb
+ga-ie ga-latn ga-latn-ie gd-gb gd-latn gd-latn-gb gl-es gl-latn gl-latn-es gn-latn
+gn-latn-py gn-py gu-gujr gu-gujr-in gu-in gv-im gv-latn gv-latn-im ha-arab
+ha-arab-cm ha-arab-ng ha-arab-sd ha-cm ha-gh ha-latn ha-latn-ng ha-ne ha-ng ha-sd
+he-hebr he-hebr-il he-il hi-deva hi-deva-in hi-in hi-latn hi-latn-in ho-latn
+ho-latn-pg ho-pg hr-ba hr-hr hr-latn hr-latn-hr ht-ht ht-latn ht-latn-ht hu-hu
+hu-latn hu-latn-hu hy-am hy-armn hy-armn-am hz-latn hz-latn-na hz-na ia-001 ia-latn
+ia-latn-001 id-id id-latn id-latn-id ie-ee ie-latn ie-latn-ee ig-latn ig-latn-ng
+ig-ng ii-cn ii-yiii ii-yiii-cn ik-latn ik-latn-us ik-us in-id in-latn in-latn-id
+io-001 io-latn io-latn-001 is-is is-latn is-latn-is it-ch it-it it-latn it-latn-it
+it-sm it-va iu-ca iu-cans iu-cans-ca iw-hebr iw-hebr-il iw-il ja-jp ja-jpan
+ja-jpan-jp ji-hebr ji-hebr-ua ji-ua jv-id jv-latn jv-latn-id jw-id jw-latn
+jw-latn-id ka-ge ka-geor ka-geor-ge kg-cd kg-latn kg-latn-cd ki-ke ki-latn
+ki-latn-ke kj-latn kj-latn-na kj-na kk-af kk-arab kk-arab-af kk-arab-cn kk-arab-ir
+kk-arab-kz kk-arab-mn kk-cn kk-cyrl kk-cyrl-kz kk-ir kk-kz kk-mn kl-gl kl-latn
+kl-latn-gl km-kh km-khmr km-khmr-kh kn-in kn-knda kn-knda-in ko-cn ko-kore
+ko-kore-kr ko-kp ko-kr kr-latn kr-latn-ng kr-ng ks-arab ks-arab-in ks-deva
+ks-deva-in ks-in ku-am ku-arab ku-arab-iq ku-arab-ir ku-arab-lb ku-arab-tr ku-az
+ku-cyrl ku-cyrl-am ku-cyrl-az ku-cyrl-ge ku-cyrl-tm ku-cyrl-tr ku-ge ku-iq ku-ir
+ku-latn ku-latn-iq ku-latn-sy ku-latn-tr ku-lb ku-sy ku-tm ku-tr ku-yezi ku-yezi-ge
+ku-yezi-tr kv-cyrl kv-cyrl-ru kv-ru kw-gb kw-latn kw-latn-gb ky-arab ky-arab-cn
+ky-arab-kg ky-cn ky-cyrl ky-cyrl-kg ky-kg ky-latn ky-latn-kg ky-latn-tr ky-tr
+la-latn la-latn-va la-va lb-latn lb-latn-lu lb-lu lg-latn lg-latn-ug lg-ug li-latn
+li-latn-nl li-nl ln-ao ln-cd ln-cf ln-cg ln-latn ln-latn-cd lo-la lo-laoo lo-laoo-la
+lt-latn lt-latn-lt lt-lt lu-cd lu-latn lu-latn-cd lv-latn lv-latn-lv lv-lv mg-latn
+mg-latn-mg mg-mg mh-latn mh-latn-mh mh-mh mi-latn mi-latn-nz mi-nz mk-cyrl
+mk-cyrl-mk mk-mk ml-in ml-mlym ml-mlym-in mn-cn mn-cyrl mn-cyrl-mn mn-mn mn-mong
+mn-mong-cn mn-mong-mn mo-latn mo-latn-ro mo-ro mr-deva mr-deva-in mr-in ms-arab
+ms-arab-cc ms-arab-my ms-bn ms-cc ms-id ms-latn ms-latn-my ms-my ms-sg mt-latn
+mt-latn-mt mt-mt my-mm my-mymr my-mymr-mm na-latn na-latn-nr na-nr nb-latn
+nb-latn-no nb-no nb-sj nd-latn nd-latn-zw nd-zw ne-deva ne-deva-np ne-in ne-np
+ng-latn ng-latn-na ng-na nl-aw nl-be nl-bq nl-cw nl-latn nl-latn-nl nl-nl nl-sr
+nl-sx nn-latn nn-latn-no nn-no no-latn no-latn-no no-no nr-latn nr-latn-za nr-za
+nv-latn nv-latn-us nv-us ny-latn ny-latn-mw ny-mw oc-es oc-fr oc-latn oc-latn-fr
+oj-ca oj-cans oj-cans-ca om-et om-ke om-latn om-latn-et or-in or-orya or-orya-in
+os-cyrl os-cyrl-ge os-ge os-ru pa-arab pa-arab-in pa-arab-pk pa-guru pa-guru-in
+pa-in pa-pk pi-deva pi-deva-gb pi-deva-in pi-gb pi-in pi-latn pi-latn-gb pi-lk pi-mm
+pi-mymr pi-mymr-gb pi-mymr-mm pi-sinh pi-sinh-gb pi-sinh-lk pi-th pi-thai pi-thai-gb
+pi-thai-th pl-latn pl-latn-pl pl-pl ps-af ps-arab ps-arab-af ps-pk pt-ao pt-br pt-ch
+pt-cv pt-gq pt-gw pt-latn pt-latn-br pt-lu pt-mo pt-mz pt-pt pt-st pt-tl qu-bo qu-ec
+qu-latn qu-latn-pe qu-pe rm-ch rm-latn rm-latn-ch rn-bi rn-latn rn-latn-bi ro-latn
+ro-latn-ro ro-md ro-ro ru-by ru-cyrl ru-cyrl-ru ru-kg ru-kz ru-md ru-ru ru-ua
+rw-latn rw-latn-rw rw-rw sa-deva sa-deva-in sa-in sc-it sc-latn sc-latn-it sd-arab
+sd-arab-pk sd-deva sd-deva-in sd-deva-pk sd-in sd-khoj sd-khoj-in sd-khoj-pk sd-pk
+sd-sind sd-sind-in sd-sind-pk se-fi se-latn se-latn-no se-no se-se sg-cf sg-latn
+sg-latn-cf si-lk si-sinh si-sinh-lk sk-latn sk-latn-sk sk-sk sl-latn sl-latn-si
+sl-si sm-latn sm-latn-ws sm-ws sn-latn sn-latn-zw sn-zw so-dj so-et so-ke so-latn
+so-latn-so so-so sq-al sq-latn sq-latn-al sq-mk sq-xk sr-ba sr-cyrl sr-cyrl-ba
+sr-cyrl-me sr-cyrl-rs sr-cyrl-xk sr-latn sr-latn-ba sr-latn-me sr-latn-ro sr-latn-rs
+sr-latn-tr sr-latn-xk sr-me sr-ro sr-rs sr-tr sr-xk ss-latn ss-latn-za ss-za st-latn
+st-latn-za st-ls st-za su-id su-latn su-latn-id sv-ax sv-fi sv-latn sv-latn-se sv-se
+sw-cd sw-ke sw-latn sw-latn-tz sw-tz sw-ug ta-in ta-lk ta-my ta-sg ta-taml
+ta-taml-in te-in te-telu te-telu-in tg-arab tg-arab-pk tg-arab-tj tg-cyrl tg-cyrl-tj
+tg-pk tg-tj th-th th-thai th-thai-th ti-er ti-et ti-ethi ti-ethi-et tk-latn
+tk-latn-tm tk-tm tl-latn tl-latn-ph tl-ph tn-bw tn-latn tn-latn-za tn-za to-latn
+to-latn-to to-to tr-cy tr-latn tr-latn-tr tr-tr ts-latn ts-latn-za ts-za tt-cyrl
+tt-cyrl-ru tt-ru ty-latn ty-latn-pf ty-pf ug-arab ug-arab-cn ug-cn ug-cyrl
+ug-cyrl-cn ug-cyrl-kz ug-cyrl-mn ug-kz ug-mn uk-cyrl uk-cyrl-ua uk-ua ur-arab
+ur-arab-pk ur-in ur-pk uz-af uz-arab uz-arab-af uz-arab-uz uz-cn uz-cyrl uz-cyrl-cn
+uz-cyrl-uz uz-latn uz-latn-uz uz-uz ve-latn ve-latn-za ve-za vi-latn vi-latn-vn
+vi-vn vo-001 vo-latn vo-latn-001 wa-be wa-latn wa-latn-be wo-latn wo-latn-sn wo-sn
+xh-latn xh-latn-za xh-za yi-hebr yi-hebr-ua yi-ua yo-bj yo-latn yo-latn-ng yo-ng
+za-cn za-latn za-latn-cn zh-au zh-bn zh-bopo zh-bopo-cn zh-bopo-tw zh-cn zh-gb zh-gf
+zh-hanb zh-hanb-cn zh-hanb-tw zh-hans zh-hans-cn zh-hans-hk zh-hans-mo zh-hans-my
+zh-hans-sg zh-hant zh-hant-au zh-hant-bn zh-hant-cn zh-hant-gb zh-hant-gf zh-hant-hk
+zh-hant-id zh-hant-mo zh-hant-my zh-hant-pa zh-hant-pf zh-hant-ph zh-hant-sr
+zh-hant-th zh-hant-tw zh-hant-us zh-hant-vn zh-hk zh-id zh-mo zh-my zh-pa zh-pf
+zh-ph zh-sg zh-sr zh-th zh-tw zh-us zh-vn zu-latn zu-latn-za zu-za
+""".split())
+# ISO 3166-1 regions as the IANA Language Subtag Registry lists them for
+# BCP 47 (File-Date 2026-11-18), private-use codes left out.
+_ISO_REGIONS = frozenset("""
+ac ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj bl bm
+bn bo bq br bs bt bv bw by bz ca cc cd cf cg ch ci ck cl cm cn co cp cq cr cu cv cw
+cx cy cz de dg dj dk dm do dz ea ec ee eg eh er es et eu ez fi fj fk fm fo fr ga gb
+gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu ic id ie il im
+in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz la lb lc li lk lr ls
+lt lu lv ly ma mc md me mf mg mh mk ml mm mn mo mp mq mr ms mt mu mv mw mx my mz na
+nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk pl pm pn pr ps pt pw py qa re
+ro rs ru rw sa sb sc sd se sg sh si sj sk sl sm sn so sr ss st sv sx sy sz ta tc td
+tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug um un us uy uz va vc ve vg vi vn vu
+wf ws ye yt za zm zw
+""".split())
+# Languages official in five or more countries in CLDR 49's territory data
+# (English, Arabic, Spanish, French and the like), counted once per country. Sites pair these with any
+# country (en-sa, es-us), so such a pair counts even where CLDR has no locale
+# for it. A language official in one country (Tongan, Burmese) does not get
+# that, so to-do and my-id stay names. scripts/cldr_locales.py regenerates it.
+_INTERNATIONAL = frozenset("ar de en es fr it nl pt ru zh".split())
+# Codes sites use that CLDR spells differently: the region codes ISO 3166
+# reserves for the United Kingdom and the European Union, la for Latin
+# America (CLDR 419), ww and int for worldwide (CLDR 001), and the old
+# Microsoft names for simplified and traditional Chinese.
+_LOCALE_ALIASES = {"uk": "gb", "eu": "150", "la": "419", "ww": "001", "int": "001",
+                   "chs": "hans", "cht": "hant"}
+# UN M.49 area codes CLDR uses as regions (001 world, 150 Europe, 419 Latin
+# America and the like), taken from the CLDR table so pt-2030 stays a name.
+_CLDR_AREAS = frozenset(t.split("-")[-1] for t in _CLDR_LOCALES if t.split("-")[-1].isdigit())
+# Business regions sites put after a language for a group of markets (en-emea,
+# en-apac, es-latam). No standard has codes for them, so they are named here.
+_MARKET_REGIONS = {"emea", "apac", "ap", "latam", "row", "mena", "dach", "nordics"}
 
 
 def _is_locale_segment(seg):
-    """A bare language code, or one with a two-letter region or a script: en, pt-br, zh-hant."""
-    m = re.fullmatch(r"([a-z]{2})(?:[-_]([a-z]{2}|[a-z]{4}))?", (seg or "").lower())
-    if not m or m.group(1) not in _LANGUAGE_CODES:
+    """
+    True when a path segment is a locale: a bare ISO 639-1 language (en), or a
+    BCP 47 tag CLDR knows (pt-br, zh-hant, es-419, sr-latn-rs, en-uk by alias).
+    ar-vr and to-do are not, so they stay product names.
+    """
+    parts = re.split(r"[-_]", (seg or "").lower())
+    if not parts or not re.fullmatch(r"[a-z]{2}", parts[0]):
         return False
-    tail = m.group(2)
-    return tail is None or len(tail) == 2 or tail in _SCRIPTS
+    if len(parts) == 1:
+        return parts[0] in _LANGUAGE_CODES
+    if "-".join(parts) in _CLDR_LOCALES:
+        return True          # lo-la is Lao in Laos before la is Latin America
+    if len(parts) == 2:
+        lang, region = parts
+        region = _LOCALE_ALIASES.get(region, region)
+        # A widely used language with any real region, market or CLDR area
+        # code (en-sa, fr-int, es-ww, en-emea).
+        if lang in _INTERNATIONAL and (region in _ISO_REGIONS or region in _MARKET_REGIONS
+                                       or region in _CLDR_AREAS):
+            return True
+        # Country first, then the language, where CLDR has that language in
+        # that country (ca-en for en-ca, be-fr, ch-de; not is-it).
+        if parts[1] + "-" + parts[0] in _CLDR_LOCALES:
+            return True
+    parts = [parts[0]] + [_LOCALE_ALIASES.get(x, x) for x in parts[1:]]
+    return "-".join(parts) in _CLDR_LOCALES
+
+
+# Query keys that name the page itself on common publishing systems
+# (WordPress ?p= and ?page_id=, Drupal ?q=node/12, ?lang= with a locale). Anything else
+# in a query (session ids, tokens, a subscriber's email, campaign tags) says
+# who arrived and how, and is never published.
+_PAGE_KEYS = {"p", "page_id", "post", "post_id", "q", "lang", "hl", "locale"}
+# Keys kept only with a numeric value. A bare ?id= is left out on purpose:
+# mailing and redirect systems put a contact's number there too.
+_NUMERIC_KEYS = {"p", "page_id", "post", "post_id"}
 
 
 def _notice_address(url):
-    """A notice's address without its query string or fragment, for publishing."""
+    """
+    A notice's address for publishing: its fragment goes, and of its query
+    only the keys that name the page (_PAGE_KEYS) stay, as sent.
+    """
     if not url:
         return url
     p = urlparse(url)
-    return p._replace(query="", fragment="").geturl()
+    # The query's pairs are filtered as they stand, never decoded and encoded
+    # again (RFC 3986 section 6.2.2): a server may treat %20 and + or a bare
+    # key and key= differently, and the address has to keep reaching the page.
+    def keep(pair):
+        key, _, value = pair.partition("=")
+        key = unquote(key)       # keys are case-sensitive: ?P= is not WordPress's ?p=
+        if key not in _PAGE_KEYS:
+            return False
+        if key == "q":
+            return re.fullmatch(r"node/\d+", unquote(value)) is not None   # Drupal
+        if key in ("lang", "hl", "locale"):
+            return _is_locale_segment(unquote(value))
+        return key not in _NUMERIC_KEYS or value.isdigit()
+    # Both separators RFC 3986 sites use between pairs, so a ;sid= rides along
+    # with nothing.
+    separator = ";" if ";" in p.query and "&" not in p.query else "&"
+    # A query with any & is split on & alone, so a ; inside a value stays
+    # part of it as the server read it.
+    pairs = [pair for pair in (p.query.split("&") if "&" in p.query else p.query.split(";"))
+             if pair and keep(pair)]
+    # Path parameters (;jsessionid=) say who arrived, never which page.
+    path = re.sub(r";[^/]*", "", p.path)
+    # A user name or password before the host is never published.
+    netloc = p.netloc.rsplit("@", 1)[-1]
+    return p._replace(netloc=netloc, path=path, params="", query=separator.join(pairs),
+                      fragment="").geturl()
 
 
 def sunset_landing(url, final, name=None):
@@ -378,22 +607,38 @@ def sunset_landing(url, final, name=None):
     product_seg = ""
     path_product = ""
     version = ""
-    for seg in reversed(named):
+    skipping_to_product = False
+    for idx in range(len(named) - 1, -1, -1):
+        seg = named[idx]
+        if _compact(seg, drop_filler=False) in _SECTIONS:
+            if any((usable(_compact(x)) or usable(_compact(x, drop_filler=False)))
+                   and _compact(x, drop_filler=False) not in _SECTIONS
+                   for x in named[:idx]):
+                skipping_to_product = True
+                continue   # /widget/resources/ names the widget above it
+            break          # a listed section page (/resources/) names no product
         if re.fullmatch(r"v\d+(?:\.\d+)*", seg, re.I):
             version = _compact(seg)
             continue   # a version (/widget/v1) names the product above it
-        p = _compact(_DATE_PREFIX.sub("", unquote(seg)))
+        p = _compact(_strip_date(unquote(seg)))
+        whole = _compact(_strip_date(unquote(seg)), drop_filler=False)
+        # "our" in front of a section word is still the section (our-tools);
+        # "a" or "the" makes a name (a-team).
+        ours = re.match(r"our[-_]", seg, re.I) and (p in _GENERIC_PRODUCTS or p in _SECTIONS)
+        if not usable(p) and not ours and usable(whole):
+            p = whole          # a name made of filler words: to-do
         if usable(p):
-            products.add(p)
+            products.update({p, whole} if usable(whole) else {p})
             if version:
                 products.add(p + version)
             product_seg = seg
             path_product = p
             break
-        if p not in _GENERIC_PRODUCTS:
-            break
+        if p not in _GENERIC_PRODUCTS and not skipping_to_product and not seg.isdigit():
+            break      # a number (/2024/, a page) is skipped like a generic page
     # A front page, alone, in one language, or its about page (/en/about/).
-    front_page = all(_is_language_root("/" + seg) or _compact(seg) in _GENERIC_PRODUCTS
+    front_page = all(_is_locale_segment(seg)
+                     or (_compact(seg) in _GENERIC_PRODUCTS and _compact(seg) not in _SECTIONS)
                      for seg in named)
     if not products and front_page:
         # A listed front page, alone or in one language (/en/):
@@ -435,23 +680,65 @@ def sunset_landing(url, final, name=None):
         # discontinued): the rest is compared with the other one trimmed too.
         def rest_names_product(m):
             rest = m.group("rest")
-            # A dated item only matches a notice for its own year: the 2023
-            # report is not the 2024 report. A notice with no year still counts.
+            # A dated item only matches a notice that names its own year: the
+            # 2023 report is not the 2024 report, nor a "report" with no year.
             listed_year = re.match(r"(\d{4})[-_]", product_seg)
-            landed_years = re.findall(r"(?<!\d)(\d{4})(?!\d)", seg)
+            # A four-digit prefix is a year only in the range a listing can
+            # date from (2030-agenda and 1000-cities are names).
+            if listed_year and not _is_year(listed_year.group(1)):
+                listed_year = None
+            # The notice's own segment, or a year folder right above it
+            # (/news/2024/widget-sunset/).
+            # A full date at the front of the slug (2025-01-15-widget-sunset) is
+            # when the notice came out, like a /2025/01/ folder, so only a year
+            # earlier than the item's rules a match out.
+            dated = re.match(r"(\d{4})[-_](?:0[1-9]|1[0-2])[-_]", seg)
+            body = seg[dated.end():] if dated else seg
+            landed_years = [y for y in re.findall(r"(?<!\d)(\d{4})(?!\d)", body) if _is_year(y)]
+            # A school or fiscal year (2024-25) covers both years.
+            for a, b in re.findall(r"(?<!\d)(\d{4})[-_](\d{2})(?!\d)", body):
+                if _is_year(a) and int(b) == (int(a) + 1) % 100:
+                    landed_years.append(str(int(a) + 1))
+            if dated and listed_year and _is_year(dated.group(1)) \
+                    and int(dated.group(1)) <= int(listed_year.group(1)):
+                landed_years.append(dated.group(1))
+            # and a /YYYY/ or /YYYY/MM/(DD/) permalink above it.
+            # A /YYYY/MM/ permalink is when the notice came out, which can be
+            # later than the item's year but never earlier.
+            for x in segs[max(0, i - 3):i]:
+                if re.fullmatch(r"\d{4}", x) and _is_year(x) and listed_year:
+                    if int(x) < int(listed_year.group(1)):
+                        return False   # published before the item existed
+                    if int(x) == int(listed_year.group(1)):
+                        landed_years.append(x)
             if listed_year and landed_years and listed_year.group(1) not in landed_years:
+                return False
+            # An undated notice fits a dated listing unless the rest of its
+            # name is something that comes out every year (2024-report, 2024-impact-report).
+            rest_words = [w for w in re.split(r"[^a-z0-9]+",
+                                              _WEB_EXT.sub("", _strip_date(product_seg).lower())) if w]
+            last = rest_words[-1] if rest_words else ""
+            if listed_year and not landed_years and (
+                    last in _RECURRING or (last.endswith("s") and last[:-1] in _RECURRING)
+                    or (last.endswith("es") and last[:-2] in _RECURRING)):
                 return False
             # A subject word before "shutdown" is the page's topic, unless it
             # is the listed product's own name and the page sits under a
             # section such as /news/ (/map sent to /news/map-shutdown/).
-            under_section = any(x and not _is_language_root("/" + x) for x in segs[:i])
+            under_section = any(x and not _is_locale_segment(x) for x in segs[:i])
             if _compact(rest) in _SHUTDOWN_SUBJECTS and _SHUTDOWN_WORD.search(seg) \
                     and not (_compact(rest) == path_product and under_section):
                 return False
             trimmed = re.sub(r"^(?:" + _SUNSET_WORDS + r"|farewell(?:[-_]to)?)[-_]|[-_]"
                              + _SUNSET_WORDS + r"$", "",
                              rest, flags=re.I)
-            return _compact(rest) in products or _compact(trimmed) in products
+            # Compared with and without filler words: farewell-to-the-widget
+            # is widget, and to-do stays todo.
+            # The leading date the pattern took off goes back on too, for a
+            # name that starts with a number (2090-agenda).
+            with_date = m.string[:m.end("rest")]
+            return any(_compact(x, f) in products for x in (rest, trimmed, with_date)
+                       for f in (True, False))
         m = next((m for m in (_SUNSET_AT_END.match(seg), _SUNSET_AT_START.match(seg))
                   if m and rest_names_product(m)), None)
         if not m:
@@ -459,12 +746,11 @@ def sunset_landing(url, final, name=None):
         # A downtime word anywhere in the path outside the product's name marks
         # an outage (/maintenance/widget-shutdown/). A section such as
         # /planned-giving/ blocks a real notice too, a miss accepted for it.
-        around = "/".join([x for x in segs[:i] if not _is_language_root("/" + x)]
+        around = "/".join([x for x in segs[:i] if not _is_locale_segment(x)]
                           + [seg.replace(m.group("rest"), "")]
-                          + [x for x in segs[i + 1:] if not _is_language_root("/" + x)])
-        # A funding lapse names itself anywhere in the path
-        # (/lapse-in-appropriations/widget-shutdown/).
-        if _DOWNTIME.search(around) or _FUNDING_LAPSE.search(around) or _GOV_SHUTDOWN.search(seg):
+                          + [x for x in segs[i + 1:] if not _is_locale_segment(x)])
+        # _DOWNTIME covers a funding lapse too (/lapse-in-appropriations/).
+        if _DOWNTIME.search(around) or _GOV_SHUTDOWN.search(seg):
             continue
         # A match under a people section is a person leaving, not a product.
         if any(
@@ -2391,12 +2677,12 @@ na nv nd ne ng nb nn no ii nr oc oj cu om or os pa pi fa pl ps pt qu rm rn ro
 ru sa sc sd se sm sg sr gd sn si sk sl so st es su sw ss sv ta te tg th ti bo
 tk tl tn to tr ts tt tw ty ug uk ur uz ve vi vo wa cy wo fy xh yi yo za zu
 """.split())
-_LANGUAGE_ROOT = re.compile(r"^/([a-z]{2})(?:[-_][a-z]{2,4})?$", re.I)
 
 
 def _is_language_root(path):
-    m = _LANGUAGE_ROOT.match(path)
-    return bool(m) and m.group(1).lower() in _LANGUAGE_CODES
+    """A path that is one BCP 47 locale segment and nothing else: /en, /pt-br."""
+    m = re.fullmatch(r"/([^/]+)", path or "")
+    return bool(m) and _is_locale_segment(m.group(1))
 
 
 def _path_prefix(url):
