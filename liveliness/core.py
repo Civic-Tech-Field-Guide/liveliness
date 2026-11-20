@@ -492,9 +492,18 @@ def _is_locale_segment(seg):
         return parts[0] in _LANGUAGE_CODES
     if "-".join(parts) in _CLDR_LOCALES:
         return True          # lo-la is Lao in Laos before la is Latin America
-    if len(parts) == 2 and parts[0] in _INTERNATIONAL and (
-            parts[1] in _ISO_REGIONS or parts[1] in _MARKET_REGIONS):
-        return True
+    if len(parts) == 2:
+        lang, region = parts
+        region = _LOCALE_ALIASES.get(region, region)
+        # A widely used language with any real region, market or CLDR area
+        # code (en-sa, fr-int, es-ww, en-emea).
+        if lang in _INTERNATIONAL and (region in _ISO_REGIONS or region in _MARKET_REGIONS
+                                       or region.isdigit()):
+            return True
+        # Country first, then the language, where CLDR has that language in
+        # that country (ca-en for en-ca, be-fr, ch-de; not is-it).
+        if parts[1] + "-" + parts[0] in _CLDR_LOCALES:
+            return True
     parts = [parts[0]] + [_LOCALE_ALIASES.get(x, x) for x in parts[1:]]
     return "-".join(parts) in _CLDR_LOCALES
 
@@ -539,7 +548,10 @@ def _notice_address(url):
              if pair and keep(pair)]
     # Path parameters (;jsessionid=) say who arrived, never which page.
     path = re.sub(r";[^/]*", "", p.path)
-    return p._replace(path=path, params="", query=separator.join(pairs), fragment="").geturl()
+    # A user name or password before the host is never published.
+    netloc = p.netloc.rsplit("@", 1)[-1]
+    return p._replace(netloc=netloc, path=path, params="", query=separator.join(pairs),
+                      fragment="").geturl()
 
 
 def sunset_landing(url, final, name=None):
@@ -668,14 +680,24 @@ def sunset_landing(url, final, name=None):
                 listed_year = None
             # The notice's own segment, or a year folder right above it
             # (/news/2024/widget-sunset/).
-            landed_years = [y for y in re.findall(r"(?<!\d)(\d{4})(?!\d)", seg) if _is_year(y)]
+            # A full date at the front of the slug (2025-01-15-widget-sunset) is
+            # when the notice came out, like a /2025/01/ folder, so only a year
+            # earlier than the item's rules a match out.
+            dated = re.match(r"(\d{4})[-_]\d{2}[-_]", seg)
+            body = seg[dated.end():] if dated else seg
+            landed_years = [y for y in re.findall(r"(?<!\d)(\d{4})(?!\d)", body) if _is_year(y)]
+            if dated and listed_year and _is_year(dated.group(1)) \
+                    and int(dated.group(1)) <= int(listed_year.group(1)):
+                landed_years.append(dated.group(1))
             # and a /YYYY/ or /YYYY/MM/(DD/) permalink above it.
             # A /YYYY/MM/ permalink is when the notice came out, which can be
             # later than the item's year but never earlier.
             for x in segs[max(0, i - 3):i]:
-                if re.fullmatch(r"\d{4}", x) and _is_year(x) and listed_year \
-                        and int(x) <= int(listed_year.group(1)):
-                    landed_years.append(x)
+                if re.fullmatch(r"\d{4}", x) and _is_year(x) and listed_year:
+                    if int(x) < int(listed_year.group(1)):
+                        return False   # published before the item existed
+                    if int(x) == int(listed_year.group(1)):
+                        landed_years.append(x)
             if listed_year and landed_years and listed_year.group(1) not in landed_years:
                 return False
             # An undated notice fits a dated listing unless the rest of its

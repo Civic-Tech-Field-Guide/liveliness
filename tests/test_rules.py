@@ -2729,6 +2729,9 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://x.org/a-team/", "https://x.org/news/a-team-sunset/"),
             ("https://x.org/2024-report", "https://x.org/news/2024/report-sunset/"),
             ("https://widget.org/en-emea/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/ca-en/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/fr-int/", "https://foundation.org/news/widget-sunset/"),
+            ("https://x.org/2024-widget", "https://x.org/news/2025-01-15-widget-sunset/"),
             ("https://x.org/to-do/resources/", "https://x.org/news/to-do-sunset/"),
             ("https://x.org/widget/2024/news/", "https://x.org/news/widget-sunset/"),
             ("https://x.org/widget/news/2024/", "https://x.org/news/widget-sunset/"),
@@ -2801,6 +2804,7 @@ def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
             ("https://x.org/2024-reports", "https://x.org/news/reports-sunset/"),
             ("https://x.org/2024-indexes", "https://x.org/news/indexes-sunset/"),
             ("https://x.org/projects/2024-widget", "https://x.org/2023/05/widget-sunset/"),
+            ("https://x.org/2024-widget", "https://x.org/2023/05/2024-widget-sunset/"),
             ("https://x.org/2023-annual-report", "https://x.org/news/2024-annual-report-sunset/"),
             ("https://x.org/2023-annual-report/overview", "https://x.org/news/2024-annual-report-sunset/"),
             ("https://x.org/team/alice", "https://x.org/blog/alice-sunsetting/"),
@@ -2962,6 +2966,7 @@ def test_a_notice_address_keeps_a_page_naming_query():
     assert core._notice_address("https://x.org/?p=1;lang=en") == "https://x.org/?p=1;lang=en"
     assert core._notice_address("https://x.org/n/;jsessionid=abc?p=1") == "https://x.org/n/?p=1"
     assert core._notice_address("https://x.org/a;jsessionid=x/b/?p=1") == "https://x.org/a/b/?p=1"
+    assert core._notice_address("https://u:pw@x.org/n?p=1") == "https://x.org/n?p=1"
     assert core._notice_address("https://x.org/n/?id=8f3a2c-token") == "https://x.org/n/"
     # With an & present the server reads ;sid= as part of lang's value, so the
     # whole pair goes.
