@@ -37,7 +37,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import NamedTuple
 from html.parser import HTMLParser as _HTMLParser
-from urllib.parse import urljoin, parse_qs, parse_qsl, urlencode, urlparse
+from urllib.parse import urljoin, parse_qs, parse_qsl, urlencode, urlparse, unquote
 
 import requests
 import tldextract
@@ -269,7 +269,7 @@ _EXT = r"(?:\.[a-z0-9]{1,5})?"
 # A notice slug may carry a date before the product or a year or notice word
 # after the ending word: 2024-widget-sunset, widget-sunset-2024.
 _BEFORE = r"(?:\d{4}(?:[-_]\d{2}){0,2}[-_])?"
-_AFTER = r"(?:[-_](?:\d{4}|notice|announcement|update))?"
+_AFTER = r"(?:[-_](?:\d{4}|notice|announcement|update))*"
 _SUNSET_AT_END = re.compile(r"^" + _BEFORE + r"(?P<rest>.+?)[-_]" + _SUNSET_WORDS + _AFTER + _EXT + r"$", re.I)
 _SUNSET_AT_START = re.compile(r"^" + _BEFORE + _SUNSET_WORDS + r"[-_](?P<rest>.+?)" + _AFTER + _EXT + r"$", re.I)
 _SUNSET_ALONE = re.compile(r"(?:^|[-_])" + _SUNSET_WORDS + r"(?=[-_]|\.[a-z0-9]{1,5}$|$)", re.I)
@@ -281,10 +281,15 @@ _DOWNTIME = re.compile(r"(?:^|[-_/])(?:maintenance|planned|scheduled|outage|down
 _FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
 _INDEX_FILE = re.compile(r"^(?:index|default|home)(?:\.[a-z0-9]{1,5})?$", re.I)
 _LOCALE = re.compile(r"^[a-z]{2}(?:[-_][a-z]{2})?$", re.I)
+_DATE_PREFIX = re.compile(r"^" + _BEFORE)
+# Slugs too generic to name a product: a page about, or an id.
+_GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page", "pages",
+                     "project", "projects", "tool", "tools", "app", "apps", "index",
+                     "service", "services", "program", "programs", "site"}
 
 
 def _compact(seg):
-    seg = re.sub(r"\.[a-z0-9]{1,5}$", "", seg.lower())
+    seg = re.sub(r"\.[a-z0-9]{1,5}$", "", unquote(seg).lower())
     return "".join(w for w in re.split(r"[^a-z0-9]+", seg) if w and w not in _FILLER)
 
 
@@ -295,8 +300,9 @@ def sunset_landing(url, final):
 
     The landed segment has to be the listed product's name with an ending word
     at one end of it. The product's name is the listed path's last segment,
-    skipping a file name such as index.html and, when the path has another
-    segment, a language code such as /en/. This stands in for trusted_move(), which it
+    skipping a file name such as index.html and a language code such as /en/.
+    A name shorter than three letters, an id or a generic page such as /about/
+    names no product. This stands in for trusted_move(), which it
     deliberately does not ask: an organization that retires a product often
     announces it from a renamed domain (foundation.mozilla.org to
     www.mozillafoundation.org).
@@ -305,30 +311,34 @@ def sunset_landing(url, final):
     notice's dates as the product's and queues the page for a reading. The
     scorer sees only the path of the redirect a plain fetch followed, so it
     misses a notice that a browser render, a meta refresh or a script reaches,
-    and one named only in a query string or fragment.
+    one named only in a query string or fragment, and one that splits the
+    product and the ending word across two segments (/widget/sunset/).
     """
     if not final or final == url or is_archive_host(final):
         return None
     listed_segs = [seg for seg in (urlparse(url).path or "").split("/") if seg]
     if any(_SUNSET_ALONE.search(seg) for seg in listed_segs):
         return None   # the listing itself is the notice: nothing moved
-    named = [seg for seg in listed_segs if not _INDEX_FILE.match(seg)]
-    if len(named) > 1:
-        named = [seg for seg in named if not _LOCALE.match(seg)] or named
+    named = [seg for seg in listed_segs
+             if not _INDEX_FILE.match(seg) and not _LOCALE.match(seg)]
     if not named:
         return None   # a front page names no product
-    product = _compact(named[-1])
-    if len(product) < 2:
+    product = _compact(_DATE_PREFIX.sub("", unquote(named[-1])))
+    if len(product) < 3 or product.isdigit() or product in _GENERIC_PRODUCTS:
         return None
     landed = urlparse(final).path or ""
-    if _DOWNTIME.search(landed):
-        return None
-    for seg in landed.split("/"):
+    segs = landed.split("/")
+    for i, seg in enumerate(segs):
         if not seg:
             continue
         m = _SUNSET_AT_END.match(seg) or _SUNSET_AT_START.match(seg)
-        if m and _compact(m.group("rest")) == product:
-            return landed
+        if not m or _compact(m.group("rest")) != product:
+            continue
+        # A downtime word counts only outside the product's own name.
+        around = "/".join(segs[:i] + [seg.replace(m.group("rest"), "")] + segs[i + 1:])
+        if _DOWNTIME.search(around):
+            return None
+        return landed
     return None
 
 
@@ -4060,6 +4070,10 @@ def score_project(project, budget_s=None):
     # March says nothing about a domain that stopped answering in August, and an
     # address that now resolves to an archive snapshot has already been capped
     # for exactly that reason — the floor would undo the cap.
+    if recent_launch and notice:
+        why.append("Added to the directory in the last nine months and marked as a "
+                   "launch, but its address now redirects to a shutdown notice")
+        recent_launch = False
     if recent_launch and (website_alive is False or is_archived):
         why.append("Added to the directory in the last nine months and marked as a "
                    "launch, but %s, which is the better evidence"
@@ -4081,8 +4095,10 @@ def score_project(project, budget_s=None):
 
     if notice:
         why.append("The listed address now redirects to %s, which reads as a shutdown "
-                   "notice, so the scorer counts nothing dated on that page and queues "
-                   "it for a reading" % notice)
+                   "notice, so the scorer counts nothing dated on that page, leaves "
+                   "Status for a person, and %s" % (
+                       notice, "queues the page for a reading" if pending_adjudication
+                       else "could not queue the page for a reading"))
 
     # The page saying it has finished outranks everything above it, including a
     # recent launch: something added to the directory in March and closed in July
@@ -4118,6 +4134,12 @@ def score_project(project, budget_s=None):
     # rests on them alone can read Active, but it is not the confidence the
     # Status field asks for, so Status is left alone.
     if status == "Active" and winner is not None and not winner.own:
+        status = None
+    # A listing whose address now redirects to its shutdown notice gets no
+    # Status from the rules. Supplied feeds and social accounts are often the
+    # organization's, still busy after the product ended, and only a reading of
+    # the notice can say what it means.
+    if notice and status in ("Active", "Inactive"):
         status = None
 
     # A finished piece of work is N/A, and it outranks anything the signals say.

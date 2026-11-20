@@ -2679,7 +2679,10 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://x.org/widget", "https://x.org/news/widget-sunset-2024/"),
             ("https://x.org/widget", "https://x.org/news/2024-widget-sunset/"),
             ("https://x.org/widget", "https://x.org/widget-shutdown-notice"),
-            ("https://x.org/ai", "https://x.org/ai-sunset/")):
+            ("https://x.org/outage-map", "https://x.org/news/outage-map-sunset/"),
+            ("https://x.org/2024-report", "https://x.org/2024-report-sunset/"),
+            ("https://x.org/Widget%20App", "https://x.org/widget-app-sunset/"),
+            ("https://x.org/widget", "https://x.org/widget-sunset-notice-2024/")):
         assert core.sunset_landing(listed, final), (listed, final)
 
 
@@ -2700,7 +2703,12 @@ def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
             ("https://x.org/programs/widget", "https://x.org/blog/farewell-to-our-programs-team/"),
             ("https://x.org/keepiton", "https://x.org/campaigns/internet-shutdown/"),
             ("https://x.org/foo-sunset", "https://x.org/foo-sunset/"),
-            ("https://x.org/", "https://x.org/news/site-sunset/")):
+            ("https://x.org/", "https://x.org/news/site-sunset/"),
+            ("https://x.org/internet", "https://x.org/internet-shutdown/"),
+            ("https://x.org/widget/about", "https://x.org/about-sunset/"),
+            ("https://x.org/p/12345", "https://x.org/12345-sunset/"),
+            ("https://x.org/en", "https://x.org/en-sunset"),
+            ("https://x.org/ai", "https://x.org/ai-sunset/")):
         assert not core.sunset_landing(listed, final), (listed, final)
 
 
@@ -2731,8 +2739,26 @@ def test_a_shutdown_notice_dates_nothing_and_goes_to_a_reading(monkeypatch):
     result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
     assert seen == [None]          # no feed discovered from the notice
     assert result["adjudication"] and "has moved" in result["adjudication"]["text"]
-    assert result["status"] != "Active"
+    assert result["status"] is None
     assert "widget-sunset" in result["breakdown"]
+    assert "queues the page for a reading" in result["breakdown"]
+
+
+def test_a_notices_supplied_feed_does_not_make_it_active(monkeypatch):
+    from liveliness import core
+    _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    monkeypatch.setattr(core, "latest_blog_date", lambda *a: _now())
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
+    assert result["status"] is None
+
+
+def test_a_notice_without_a_reading_says_so(monkeypatch):
+    from liveliness import core
+    _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    monkeypatch.setattr(core, "ADJUDICATE", False)
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
+    assert result["adjudication"] is None
+    assert "could not queue the page for a reading" in result["breakdown"]
 
 
 def test_an_ordinary_redirect_is_still_dated(monkeypatch):
