@@ -33,8 +33,8 @@ def main(version):
         if len(parts[0]) != 2 or len(parts) == 1:
             continue
         pairs.add("-".join(parts))
-        if len(parts) == 3:
-            pairs.add(parts[0] + "-" + parts[2])
+        if len(parts) == 3 and (len(parts[2]) == 2 or parts[2].isdigit()):
+            pairs.add(parts[0] + "-" + parts[2])   # a region, not a variant
     for key, value in likely.items():
         if len(key.split("-")[0]) != 2:
             continue
@@ -53,14 +53,14 @@ def main(version):
     # Languages official in five or more countries.
     territories = fetch(version, "supplemental/territoryInfo.json")["supplemental"]["territoryInfo"]
     official = {}
-    for info in territories.values():
+    for territory, info in territories.items():
         for lang, d in info.get("languagePopulation", {}).items():
             base = lang.split("_")[0]
             if len(base) == 2 and d.get("_officialStatus") in (
                     "official", "de_facto_official", "official_regional"):
-                official[base] = official.get(base, 0) + 1
+                official.setdefault(base, set()).add(territory)   # once per country
     print('_INTERNATIONAL = frozenset("%s".split())'
-          % " ".join(sorted(l for l, n in official.items() if n >= 5)))
+          % " ".join(sorted(l for l, t in official.items() if len(t) >= 5)))
     # ISO 3166-1 regions as BCP 47 takes them, private use (AA, ZZ, ranges) out.
     text = urllib.request.urlopen(REGISTRY, timeout=30).read().decode("utf-8")
     regions = set()

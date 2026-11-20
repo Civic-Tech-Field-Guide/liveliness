@@ -351,17 +351,17 @@ az-cyrl az-cyrl-az az-cyrl-ru az-iq az-ir az-latn az-latn-az az-ru ba-cyrl
 ba-cyrl-ru ba-ru be-by be-cyrl be-cyrl-by be-tarask bg-bg bg-cyrl bg-cyrl-bg bi-latn
 bi-latn-vu bi-vu bm-latn bm-latn-ml bm-ml bn-bd bn-beng bn-beng-bd bn-in bo-cn bo-in
 bo-tibt bo-tibt-cn br-fr br-latn br-latn-fr bs-ba bs-cyrl bs-cyrl-ba bs-latn
-bs-latn-ba ca-ad ca-es ca-es-valencia ca-fr ca-it ca-latn ca-latn-es ca-valencia
-ce-cyrl ce-cyrl-ru ce-ru ch-gu ch-latn ch-latn-gu co-fr co-latn co-latn-fr cr-ca
-cr-cans cr-cans-ca cs-cz cs-latn cs-latn-cz cu-bg cu-cyrl cu-cyrl-ru cu-glag
-cu-glag-bg cu-glag-ru cu-ru cv-cyrl cv-cyrl-ru cv-ru cy-gb cy-latn cy-latn-gb da-dk
-da-gl da-latn da-latn-dk de-at de-be de-ch de-de de-it de-latn de-latn-de de-li
-de-lu dv-mv dv-thaa dv-thaa-mv dz-bt dz-tibt dz-tibt-bt ee-gh ee-latn ee-latn-gh
-ee-tg el-cy el-gr el-grek el-grek-gr el-polyton en-001 en-150 en-ae en-ag en-ai
-en-as en-at en-au en-bb en-be en-bi en-bm en-bs en-bw en-bz en-ca en-cc en-ch en-ck
-en-cm en-cx en-cy en-cz en-de en-dg en-dk en-dm en-ee en-er en-es en-fi en-fj en-fk
-en-fm en-fr en-gb en-gd en-ge en-gg en-gh en-gi en-gm en-gs en-gu en-gy en-hk en-hu
-en-id en-ie en-il en-im en-in en-io en-it en-je en-jm en-jp en-ke en-ki en-kn en-ky
+bs-latn-ba ca-ad ca-es ca-es-valencia ca-fr ca-it ca-latn ca-latn-es ce-cyrl
+ce-cyrl-ru ce-ru ch-gu ch-latn ch-latn-gu co-fr co-latn co-latn-fr cr-ca cr-cans
+cr-cans-ca cs-cz cs-latn cs-latn-cz cu-bg cu-cyrl cu-cyrl-ru cu-glag cu-glag-bg
+cu-glag-ru cu-ru cv-cyrl cv-cyrl-ru cv-ru cy-gb cy-latn cy-latn-gb da-dk da-gl
+da-latn da-latn-dk de-at de-be de-ch de-de de-it de-latn de-latn-de de-li de-lu
+dv-mv dv-thaa dv-thaa-mv dz-bt dz-tibt dz-tibt-bt ee-gh ee-latn ee-latn-gh ee-tg
+el-cy el-gr el-grek el-grek-gr el-polyton en-001 en-150 en-ae en-ag en-ai en-as
+en-at en-au en-bb en-be en-bi en-bm en-bs en-bw en-bz en-ca en-cc en-ch en-ck en-cm
+en-cx en-cy en-cz en-de en-dg en-dk en-dm en-ee en-er en-es en-fi en-fj en-fk en-fm
+en-fr en-gb en-gd en-ge en-gg en-gh en-gi en-gm en-gs en-gu en-gy en-hk en-hu en-id
+en-ie en-il en-im en-in en-io en-it en-je en-jm en-jp en-ke en-ki en-kn en-ky
 en-latn en-latn-us en-lc en-lr en-ls en-lt en-lv en-mg en-mh en-mo en-mp en-ms en-mt
 en-mu en-mv en-mw en-my en-na en-nf en-ng en-nl en-no en-nr en-nu en-nz en-pg en-ph
 en-pk en-pl en-pn en-pr en-pt en-pw en-ro en-rw en-sb en-sc en-sd en-se en-sg en-sh
@@ -463,11 +463,11 @@ tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug um un us uy uz va vc ve vg vi vn
 wf ws ye yt za zm zw
 """.split())
 # Languages official in five or more countries in CLDR 49's territory data
-# (English, Arabic, Spanish, French and the like). Sites pair these with any
+# (English, Arabic, Spanish, French and the like), counted once per country. Sites pair these with any
 # country (en-sa, es-us), so such a pair counts even where CLDR has no locale
 # for it. A language official in one country (Tongan, Burmese) does not get
 # that, so to-do and my-id stay names. scripts/cldr_locales.py regenerates it.
-_INTERNATIONAL = frozenset("ar de en es fr it nl pt ru sr zh".split())
+_INTERNATIONAL = frozenset("ar de en es fr it nl pt ru zh".split())
 # Codes sites use that CLDR spells differently: the region codes ISO 3166
 # reserves for the United Kingdom and the European Union, la for Latin
 # America (CLDR 419), ww and int for worldwide (CLDR 001), and the old
@@ -533,7 +533,10 @@ def _notice_address(url):
     # Both separators RFC 3986 sites use between pairs, so a ;sid= rides along
     # with nothing.
     separator = ";" if ";" in p.query and "&" not in p.query else "&"
-    pairs = [pair for pair in re.split(r"[&;]", p.query) if pair and keep(pair)]
+    # A query with any & is split on & alone, so a ; inside a value stays
+    # part of it as the server read it.
+    pairs = [pair for pair in (p.query.split("&") if "&" in p.query else p.query.split(";"))
+             if pair and keep(pair)]
     # Path parameters (;jsessionid=) say who arrived, never which page.
     path = re.sub(r";[^/]*", "", p.path)
     return p._replace(path=path, params="", query=separator.join(pairs), fragment="").geturl()
@@ -610,8 +613,8 @@ def sunset_landing(url, final, name=None):
             product_seg = seg
             path_product = p
             break
-        if p not in _GENERIC_PRODUCTS and not skipping_to_product:
-            break
+        if p not in _GENERIC_PRODUCTS and not skipping_to_product and not seg.isdigit():
+            break      # a number (/2024/, a page) is skipped like a generic page
     # A front page, alone, in one language, or its about page (/en/about/).
     front_page = all(_is_locale_segment(seg)
                      or (_compact(seg) in _GENERIC_PRODUCTS and _compact(seg) not in _SECTIONS)
@@ -664,7 +667,7 @@ def sunset_landing(url, final, name=None):
             if listed_year and not _is_year(listed_year.group(1)):
                 listed_year = None
             # The notice's own segment, or a year folder right above it
-            # (/news/2024/widget-sunset/); not a /2024/05/ date permalink.
+            # (/news/2024/widget-sunset/).
             landed_years = [y for y in re.findall(r"(?<!\d)(\d{4})(?!\d)", seg) if _is_year(y)]
             # and a /YYYY/ or /YYYY/MM/(DD/) permalink above it.
             # A /YYYY/MM/ permalink is when the notice came out, which can be
@@ -681,7 +684,8 @@ def sunset_landing(url, final, name=None):
                                               _WEB_EXT.sub("", _strip_date(product_seg).lower())) if w]
             last = rest_words[-1] if rest_words else ""
             if listed_year and not landed_years and (
-                    last in _RECURRING or (last.endswith("s") and last[:-1] in _RECURRING)):
+                    last in _RECURRING or (last.endswith("s") and last[:-1] in _RECURRING)
+                    or (last.endswith("es") and last[:-2] in _RECURRING)):
                 return False
             # A subject word before "shutdown" is the page's topic, unless it
             # is the listed product's own name and the page sits under a
