@@ -417,6 +417,9 @@ def sunset_landing(url, final, name=None):
         # discontinued): the rest is compared with the other one trimmed too.
         def rest_names_product(m):
             rest = m.group("rest")
+            listed_year = re.match(r"(\d{4})[-_]", named[-1]) if named else None
+            if listed_year and listed_year.group(1) not in seg:
+                return False
             if _compact(rest) in _SHUTDOWN_SUBJECTS and _SHUTDOWN_WORD.search(seg):
                 return False
             trimmed = re.sub(r"^(?:" + _SUNSET_WORDS + r"|farewell(?:[-_]to)?)[-_]|[-_]"
@@ -427,10 +430,11 @@ def sunset_landing(url, final, name=None):
                   if m and rest_names_product(m)), None)
         if not m:
             continue
-        # A downtime word counts only in the notice's own segment, outside the
-        # product's name, or below it: /planned-giving/news/widget-sunset/ is
-        # a section name, not an outage.
-        around = "/".join([seg.replace(m.group("rest"), "")]
+        # A downtime word anywhere in the path outside the product's name marks
+        # an outage (/maintenance/widget-shutdown/). A section such as
+        # /planned-giving/ blocks a real notice too, a miss accepted for it.
+        around = "/".join([x for x in segs[:i] if not _is_language_root("/" + x)]
+                          + [seg.replace(m.group("rest"), "")]
                           + [x for x in segs[i + 1:] if not _is_language_root("/" + x)])
         # A funding lapse names itself anywhere in the path
         # (/lapse-in-appropriations/widget-shutdown/).
