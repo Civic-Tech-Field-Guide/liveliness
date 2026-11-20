@@ -2697,6 +2697,7 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://my.widget.org/", "https://foundation.org/news/widget-sunset/"),
             ("https://en.widget.org/", "https://foundation.org/news/widget-sunset/"),
             ("https://docs.widget.org/", "https://foundation.org/news/widget-sunset/"),
+            ("https://civic.widget.org/", "https://foundation.org/news/widget-sunset/"),
             ("https://x.org/tracker", "https://x.org/news/tracker-sunset/"),
             ("https://x.org/widget", "https://x.org/news/widget-sunset/en-us/"),
             ("https://x.org/widget", "https://x.org/news/widget-sunset/us/")):
@@ -2848,3 +2849,17 @@ def test_a_notice_with_nothing_else_dated_is_unknown(monkeypatch):
     result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
     assert result["score"] is None and result["activity_status"] == "Unknown"
     assert result["last_activity_date"] is None
+
+
+
+def test_a_queued_notice_with_a_fresh_repo_gets_no_status(monkeypatch):
+    from liveliness import core
+    _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    monkeypatch.setattr(core, "latest_blog_date", lambda *a: None)
+    fresh = _now()
+    monkeypatch.setattr(core, "check_github", lambda u: {"best_date": fresh, "archived": False,
+                                                         "dates": {"push": fresh}})
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/",
+                                        repo="https://github.com/x/widget"))
+    assert result["score"] is not None
+    assert result["status"] is None and result["adjudication"]["status"] is None

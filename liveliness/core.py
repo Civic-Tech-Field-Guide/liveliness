@@ -269,7 +269,7 @@ _EXT = r"(?:\.[a-z0-9]{1,5})?"
 # A notice slug may carry a date before the product or a year or notice word
 # after the ending word: 2024-widget-sunset, widget-sunset-2024.
 _BEFORE = r"(?:\d{4}(?:[-_]\d{2}){0,2}[-_])?"
-_AFTER = r"(?:[-_](?:\d{4}(?:[-_]\d{2}){0,2}|notice|announcement|update|faq))*"
+_AFTER = r"(?:[-_](?:\d{4}(?:[-_]\d{2}){0,2}|notice|announcement))*"
 _SUNSET_AT_END = re.compile(r"^" + _BEFORE + r"(?P<rest>.+?)[-_]" + _SUNSET_WORDS + _AFTER + _EXT + r"$", re.I)
 # At the start of a segment the bare words are usually a subject: a place
 # (sunset-district), a tracker (shutdown-tracker), a party (farewell-party).
@@ -373,9 +373,9 @@ def sunset_landing(url, final, name=None):
         # in parentheses ("European Digital DemocracY network (EDDY)").
         host = (urlparse(url).hostname or "").lower()
         label = (_registrable(host).split(".") or [""])[0]
-        # A subdomain names the product (widget.bigorg.org) and the registered
-        # domain the organization, so the subdomain wins when it is a usable
-        # name. A generic or short one (docs., my., en.) falls back to the domain.
+        # Both the subdomain (widget.bigorg.org) and the registered domain
+        # (widget.org behind civic.widget.org) can name the product, so both
+        # count; a generic or short subdomain (docs., my., en.) names nothing.
         sub = host[: -len(_registrable(host))].rstrip(".")
         sub = sub[4:] if sub.startswith("www.") else ("" if sub == "www" else sub)
         sub_label = sub.split(".")[-1] if sub else ""
@@ -386,7 +386,7 @@ def sunset_landing(url, final, name=None):
         outside = re.sub(r"\([^)]*\)", " ", title)
         inside = " ".join(re.findall(r"\(([^)]*)\)", title))
         sub_name = _compact(sub_label)
-        for p in (sub_name if usable(sub_name) else _compact(label),
+        for p in (sub_name, _compact(label),
                   _compact(title), _compact(outside), _compact(inside)):
             if usable(p):
                 products.add(p)
@@ -4191,9 +4191,10 @@ def score_project(project, budget_s=None):
 
     if notice:
         why.append("The listed address now redirects to %s, which reads as a shutdown "
-                   "notice, so the scorer counts nothing dated on that page, and no "
-                   "feed or social account, since those are usually the organization's%s" % (
-                       _notice_address(_PAGE_FINAL.get(website_url)) or notice, ""))
+                   "notice, so the scorer counts nothing dated on that page%s" % (
+                       _notice_address(_PAGE_FINAL.get(website_url)) or notice,
+                       ", and no feed or social account, since those are usually the "
+                       "organization's" if (project.feeds or project.links) else ""))
 
     # The page saying it has finished outranks everything above it, including a
     # recent launch: something added to the directory in March and closed in July
