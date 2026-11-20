@@ -2706,6 +2706,8 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://x.org/widget", "https://x.org/government/news/widget-sunset/"),
             ("https://x.org/about/widget", "https://x.org/news/widget-sunset/"),
             ("https://x.org/map", "https://x.org/news/map-shutdown/"),
+            ("https://x.org/widget/v1", "https://x.org/news/widget-v1-sunset/"),
+            ("https://x.org/furlough-tracker", "https://x.org/news/furlough-tracker-sunset/"),
             ("https://x.org/widget", "https://x.org/news/widget-shutdown%20notice"),
             ("https://widget.en.bigorg.org/", "https://bigorg.org/news/widget-sunset/"),
             ("https://x.org/tracker", "https://x.org/news/tracker-sunset/"),
@@ -2748,6 +2750,9 @@ def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
             ("https://agency.gov/widget", "https://agency.gov/lapse-in-appropriations/widget-shutdown/"),
             ("https://x.org/widget", "https://x.org/maintenance/widget-shutdown/"),
             ("https://x.org/widget", "https://x.org/news/widget-government-shutdown/"),
+            ("https://x.org/care", "https://x.org/services/end-of-life-care/"),
+            ("https://x.org/medications", "https://x.org/discontinued-medications/"),
+            ("https://x.org/tracker", "https://x.org/en/tracker-shutdown/"),
             ("https://x.org/2023-annual-report", "https://x.org/news/2024-annual-report-sunset/"),
             ("https://x.org/2023-annual-report/overview", "https://x.org/news/2024-annual-report-sunset/"),
             ("https://x.org/team/alice", "https://x.org/blog/alice-sunsetting/"),
@@ -2851,12 +2856,13 @@ def test_a_listed_front_page_matches_on_the_listing_name():
     assert not core.sunset_landing("https://getwidget.io/", "https://org.example/news/widget-sunset/")
 
 
-def test_a_notice_that_says_it_ended_keeps_inactive_and_is_queued(monkeypatch):
+def test_a_notice_that_says_it_ended_keeps_inactive(monkeypatch):
     from liveliness import core
     _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
     monkeypatch.setattr(core, "page_says_closed", lambda *a, **k: (True, "this project has ended"))
     result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
-    assert result["adjudication"] and result["adjudication"]["notice_url"]
+    # The closure settles it, as on any page that says so: nothing to queue.
+    assert result["adjudication"] is None
     assert result["status"] == "Inactive" and result["score"] is not None
 
 

@@ -274,9 +274,8 @@ _SUNSET_AT_END = re.compile(r"^" + _BEFORE + r"(?P<rest>.+?)[-_]" + _SUNSET_WORD
 # At the start of a segment the bare words are usually a subject: a place
 # (sunset-district), a tracker (shutdown-tracker), a party (farewell-party).
 # Only the forms that can only mean an ending count there, farewell-to-widget
-# among them.
-_SUNSET_START_WORDS = (r"(?:sunsetted|sunsetting|discontinued|discontinuation|"
-                       r"end[-_]of[-_]life|farewell[-_]to)")
+# among them; end-of-life-care and discontinued-medications are subjects.
+_SUNSET_START_WORDS = r"(?:sunsetted|sunsetting|farewell[-_]to)"
 _SUNSET_AT_START = re.compile(r"^" + _BEFORE + _SUNSET_START_WORDS + r"[-_](?P<rest>.+?)" + _AFTER + _EXT + r"$", re.I)
 # Words that make a shutdown a planned outage rather than an ending, anywhere
 # in the landed path.
@@ -378,10 +377,16 @@ def sunset_landing(url, final, name=None):
     # segment is generic (/widget/app): /team/alice is Alice, not the team.
     product_seg = ""
     path_product = ""
+    version = ""
     for seg in reversed(named):
+        if re.fullmatch(r"v\d+(?:\.\d+)*", seg, re.I):
+            version = _compact(seg)
+            continue   # a version (/widget/v1) names the product above it
         p = _compact(_DATE_PREFIX.sub("", unquote(seg)))
         if usable(p):
             products.add(p)
+            if version:
+                products.add(p + version)
             product_seg = seg
             path_product = p
             break
@@ -410,10 +415,16 @@ def sunset_landing(url, final, name=None):
         title = name or ""
         outside = re.sub(r"\([^)]*\)", " ", title)
         inside = " ".join(re.findall(r"\(([^)]*)\)", title))
-        for p in ([_compact(l) for l in sub_labels] + [_compact(label),
-                  _compact(title), _compact(outside), _compact(inside)]):
+        for p in [_compact(l) for l in sub_labels] + [_compact(label)]:
             if usable(p):
                 products.add(p)
+        # A listing name is a weaker tie than an address, so a short common
+        # word ("Care", "Vote") names nothing; an acronym in parentheses does.
+        for p in (_compact(title), _compact(outside)):
+            if usable(p) and len(p) >= 5:
+                products.add(p)
+        if usable(_compact(inside)):
+            products.add(_compact(inside))
     if not products:
         return None
     segs = [unquote(seg).replace(" ", "-") for seg in landed.split("/")]
@@ -433,7 +444,7 @@ def sunset_landing(url, final, name=None):
             # A subject word before "shutdown" is the page's topic, unless it
             # is the listed product's own name and the page sits under a
             # section such as /news/ (/map sent to /news/map-shutdown/).
-            under_section = any(segs[:i])
+            under_section = any(x and not _is_language_root("/" + x) for x in segs[:i])
             if _compact(rest) in _SHUTDOWN_SUBJECTS and _SHUTDOWN_WORD.search(seg) \
                     and not (_compact(rest) == path_product and under_section):
                 return False
@@ -453,7 +464,7 @@ def sunset_landing(url, final, name=None):
                           + [x for x in segs[i + 1:] if not _is_language_root("/" + x)])
         # A funding lapse names itself anywhere in the path
         # (/lapse-in-appropriations/widget-shutdown/).
-        if _DOWNTIME.search(around) or _FUNDING_LAPSE.search(landed) or _GOV_SHUTDOWN.search(seg):
+        if _DOWNTIME.search(around) or _FUNDING_LAPSE.search(around) or _GOV_SHUTDOWN.search(seg):
             continue
         # A match under a people section is a person leaving, not a product.
         if any(
@@ -3950,9 +3961,9 @@ def score_project(project, budget_s=None):
             page_closed, page_closed_phrase = page_says_closed(page_html, now, text=rendered)
             if page_closed:
                 _log(f"    page     → says it has closed: {page_closed_phrase!r}")
-            if notice and not page_unreadable:
-                # Queued whatever the closure check found: a person sees every
-                # notice, and the closure keeps its own Inactive meanwhile.
+            if notice and not page_closed and not page_unreadable:
+                # A notice that also says it ended has its answer already: the
+                # closure's Inactive stands, as on any page that says so.
                 words = rendered if rendered is not None else readable
                 pending_adjudication = adjudication_candidate(name, website_url, words)
                 if pending_adjudication:
