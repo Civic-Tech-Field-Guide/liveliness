@@ -2714,8 +2714,10 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://widget.org/es-ar/", "https://foundation.org/news/widget-sunset/"),
             ("https://widget.org/es-419/", "https://foundation.org/news/widget-sunset/"),
             ("https://widget.org/sr-latn-rs/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/en-uk/", "https://foundation.org/news/widget-sunset/"),
+            ("https://events.bigorg.org/", "https://bigorg.org/news/events-sunset/"),
+            ("https://x.org/to-do/", "https://x.org/news/to-do-sunset/"),
             ("https://x.org/2090-agenda", "https://x.org/news/2090-agenda-sunset/"),
-            ("https://x.org/2090-agenda", "https://x.org/news/agenda-sunset/"),
             ("https://widget.org/docs/", "https://foundation.org/news/widget-sunset/"),
             ("https://x.org/projects/2024-widget", "https://x.org/news/2024/widget-sunset/"),
             ("https://x.org/projects/2024-widget", "https://x.org/news/2024-widget-sunset/"),
@@ -2772,6 +2774,8 @@ def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
             ("https://bigorg.org/our-work/", "https://bigorg.org/news/bigorg-sunset/"),
             ("https://bigorg.org/apps/", "https://bigorg.org/news/bigorg-sunset/"),
             ("https://bigorg.org/resources/", "https://bigorg.org/news/resources-sunset/"),
+            ("https://x.org/2090-agenda", "https://x.org/news/agenda-sunset/"),
+            ("https://x.org/to-do/", "https://x.org/news/x-sunset/"),
             ("https://bigorg.org/ar-vr/about/", "https://bigorg.org/news/bigorg-sunset/"),
             ("https://x.org/2024-report", "https://x.org/news/report-sunset/"),
             ("https://x.org/2024-report", "https://x.org/2024/05/report-sunset/"),
@@ -2931,11 +2935,15 @@ def test_a_notice_address_keeps_a_page_naming_query():
     assert core._notice_address("https://x.org/a/?utm_source=r&_hsenc=x") == "https://x.org/a/"
     assert core._notice_address("https://x.org/n/?sessionid=abc&email=j%40x.org&ref=tw") == "https://x.org/n/"
     assert core._notice_address("https://x.org/?page_id=7&lang=pt%2Dbr") == "https://x.org/?page_id=7&lang=pt%2Dbr"
+    assert core._notice_address("https://x.org/?q=node/12") == "https://x.org/?q=node/12"
+    assert core._notice_address("https://x.org/n/?id=8f3a2c-token") == "https://x.org/n/"
 
 
 def test_locales_follow_bcp47_codes():
     from liveliness import core
-    for seg in ("en", "pt-br", "it-it", "es-419", "zh-hant", "sr-latn-rs", "en_GB"):
+    for seg in ("en", "pt-br", "it-it", "es-419", "zh-hant", "sr-latn-rs", "en_GB", "en-uk",
+                "en-eu", "zh-chs", "zh-tw", "fr-ca"):
         assert core._is_locale_segment(seg), seg
-    for seg in ("ar-vr", "my-data", "it-help", "en-xx", "zz", "zh-abcd", "en-aa", "fr-zzzz"):
+    for seg in ("ar-vr", "my-data", "it-help", "en-xx", "zz", "zh-abcd", "en-aa", "fr-zzzz",
+                "to-do", "my-id", "is-it", "my-ai"):
         assert not core._is_locale_segment(seg), seg
