@@ -283,6 +283,7 @@ _SUNSET_AT_START = re.compile(r"^" + _BEFORE + _SUNSET_START_WORDS + r"[-_](?P<r
 _DOWNTIME = re.compile(r"(?:^|[-_/])(?:maintenance|planned|scheduled|outage|downtime|"
                        r"weekend|tonight|temporary|lapse|appropriations|furlough|"
                        r"government|federal)(?=[-_/.]|$)", re.I)
+_FUNDING_LAPSE = re.compile(r"(?:^|[-_/])(?:lapse|appropriations|furlough)(?=[-_/.]|$)", re.I)
 # Function words dropped before the product is compared: farewell-to-the-widget.
 _FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
 _INDEX_FILE = re.compile(r"^(?:index|default|home)(?:\.[a-z0-9]{1,5})?$", re.I)
@@ -297,11 +298,15 @@ _GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page"
                      "service", "services", "program", "programs", "site",
                      "overview", "features", "docs", "documentation", "pricing",
                      "dashboard", "login", "signin", "getstarted", "faq", "contact",
-                     "team", "people", "staff", "help", "support", "download", "downloads"}
+                     "team", "people", "staff", "help", "support", "download", "downloads",
+                     "aboutus", "contactus", "whoweare", "ourwork", "work"}
+
+
+_WEB_EXT = re.compile(r"\.(?:html?|php|aspx?|jsp|cfm|pdf)$", re.I)
 
 
 def _compact(seg):
-    seg = re.sub(r"\.[a-z0-9]{1,5}$", "", unquote(seg).lower())
+    seg = _WEB_EXT.sub("", unquote(seg).lower())
     return "".join(w for w in re.split(r"[^a-z0-9]+", seg) if w and w not in _FILLER)
 
 
@@ -427,7 +432,13 @@ def sunset_landing(url, final, name=None):
         # a section name, not an outage.
         around = "/".join([seg.replace(m.group("rest"), "")]
                           + [x for x in segs[i + 1:] if not _is_language_root("/" + x)])
-        if _DOWNTIME.search(around):
+        # A funding lapse names itself anywhere in the path
+        # (/lapse-in-appropriations/widget-shutdown/).
+        if _DOWNTIME.search(around) or _FUNDING_LAPSE.search(landed):
+            continue
+        # A farewell under a people section is a person leaving, not a product.
+        if re.match(r"farewell", seg, re.I) and any(
+                _compact(x) in ("team", "people", "staff", "about") for x in listed_segs[:-1]):
             continue
         return landed
     return None
@@ -4361,7 +4372,7 @@ def score_project(project, budget_s=None):
         why = ["Nothing on this listing could be checked: no working website address, "
                "no code repository, no feed and no reachable social accounts."]
     elif undated and notice:
-        why.append("Nothing besides the notice was dated, and the scorer does not "
+        why.append("The scorer found nothing dated besides the notice, and it does not "
                    "date a notice. Reported as Unknown rather than scored.")
     elif undated:
         why.append("Nothing dated was found in code, feeds or social posts, so there is "
