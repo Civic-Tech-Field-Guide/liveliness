@@ -375,7 +375,9 @@ def sunset_landing(url, final, name=None):
             break
         if p not in _GENERIC_PRODUCTS:
             break
-    front_page = all(_is_language_root("/" + seg) for seg in named)
+    # A front page, alone, in one language, or its about page (/en/about/).
+    front_page = all(_is_language_root("/" + seg) or _compact(seg) in _GENERIC_PRODUCTS
+                     for seg in named)
     if not products and front_page:
         # A listed front page, alone or in one language (/en/):
         # the product is the site's own name, read from its registered domain
@@ -4384,4 +4386,8 @@ def score_project(project, budget_s=None):
         "breakdown":          breakdown,
         "discovered_url":     discovered_url,
         "adjudication":       pending_adjudication,
+        # Set when the listed address redirects to the product's own shutdown
+        # notice, so a caller that settles an Unknown from somewhere else (a
+        # parent organization's score) can leave this one alone.
+        "notice_url":         _notice_address(_PAGE_FINAL.get(website_url)) if notice else None,
     }

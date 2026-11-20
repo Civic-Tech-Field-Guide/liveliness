@@ -2699,6 +2699,7 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://docs.widget.org/", "https://foundation.org/news/widget-sunset/"),
             ("https://civic.widget.org/", "https://foundation.org/news/widget-sunset/"),
             ("https://x.org/my-data/app", "https://x.org/news/my-data-sunset/"),
+            ("https://widget.org/en/about/", "https://foundation.org/news/widget-sunset/"),
             ("https://widget.en.bigorg.org/", "https://bigorg.org/news/widget-sunset/"),
             ("https://x.org/tracker", "https://x.org/news/tracker-sunset/"),
             ("https://x.org/widget", "https://x.org/news/widget-sunset/en-us/"),
@@ -2879,3 +2880,4 @@ def test_an_unqueued_notice_still_gets_no_status(monkeypatch):
     result = core.score_project(Project(name="Widget", website="https://x.org/widget/",
                                         repo="https://github.com/x/widget"))
     assert result["adjudication"] is None and result["status"] is None
+    assert result["notice_url"] == "https://x.org/news/widget-sunset/"
