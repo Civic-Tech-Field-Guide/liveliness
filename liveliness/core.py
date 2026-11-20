@@ -462,16 +462,12 @@ ro rs ru rw sa sb sc sd se sg sh si sj sk sl sm sn so sr ss st sv sx sy sz ta tc
 tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug um un us uy uz va vc ve vg vi vn vu
 wf ws ye yt za zm zw
 """.split())
-# Languages CLDR lists in five or more regions (English, Arabic, Spanish,
-# French and the like). Sites pair these with any country (en-sa, es-us), so
-# such a pair counts even where CLDR has no entry for it. A language CLDR
-# ties to one country (Tongan, Burmese) does not get that, so to-do and my-id
-# stay names.
-_INTERNATIONAL = frozenset(
-    lang for lang, n in Counter(
-        t.split("-")[0] for t in _CLDR_LOCALES
-        if len(t.split("-")) == 2 and len(t.split("-")[1]) == 2).items()
-    if n >= 5)
+# Languages official in five or more countries in CLDR 49's territory data
+# (English, Arabic, Spanish, French and the like). Sites pair these with any
+# country (en-sa, es-us), so such a pair counts even where CLDR has no locale
+# for it. A language official in one country (Tongan, Burmese) does not get
+# that, so to-do and my-id stay names. scripts/cldr_locales.py regenerates it.
+_INTERNATIONAL = frozenset("ar de en es fr it nl pt ru sr zh".split())
 # Codes sites use that CLDR spells differently: the region codes ISO 3166
 # reserves for the United Kingdom and the European Union, la for Latin
 # America (CLDR 419), ww and int for worldwide (CLDR 001), and the old
@@ -535,7 +531,8 @@ def _notice_address(url):
     separator = ";" if ";" in p.query and "&" not in p.query else "&"
     pairs = [pair for pair in re.split(r"[&;]", p.query) if pair and keep(pair)]
     # Path parameters (;jsessionid=) say who arrived, never which page.
-    return p._replace(params="", query=separator.join(pairs), fragment="").geturl()
+    path = re.sub(r";[^/]*", "", p.path)
+    return p._replace(path=path, params="", query=separator.join(pairs), fragment="").geturl()
 
 
 def sunset_landing(url, final, name=None):
@@ -587,7 +584,7 @@ def sunset_landing(url, final, name=None):
     version = ""
     for idx in range(len(named) - 1, -1, -1):
         seg = named[idx]
-        if _compact(seg) in _SECTIONS:
+        if _compact(seg, drop_filler=False) in _SECTIONS:
             if any(usable(_compact(x)) and _compact(x) not in _SECTIONS
                    for x in named[:idx]):
                 continue   # /widget/resources/ names the widget above it
@@ -661,16 +658,20 @@ def sunset_landing(url, final, name=None):
                 listed_year = None
             # The notice's own segment, or a year folder right above it
             # (/news/2024/widget-sunset/); not a /2024/05/ date permalink.
-            landed_years = re.findall(r"(?<!\d)(\d{4})(?!\d)", seg)
+            landed_years = [y for y in re.findall(r"(?<!\d)(\d{4})(?!\d)", seg) if _is_year(y)]
             # and a /YYYY/ or /YYYY/MM/(DD/) permalink above it.
+            # A /YYYY/MM/ permalink is when the notice came out, which can be
+            # later than the item's year but never earlier.
             for x in segs[max(0, i - 3):i]:
-                if re.fullmatch(r"\d{4}", x) and _is_year(x):
+                if re.fullmatch(r"\d{4}", x) and _is_year(x) and listed_year \
+                        and int(x) < int(listed_year.group(1)):
                     landed_years.append(x)
             if listed_year and landed_years and listed_year.group(1) not in landed_years:
                 return False
             # An undated notice fits a dated listing unless the rest of its
             # name is something that comes out every year (2024-report, 2024-impact-report).
-            rest_words = [w for w in re.split(r"[^a-z0-9]+", _strip_date(product_seg).lower()) if w]
+            rest_words = [w for w in re.split(r"[^a-z0-9]+",
+                                              _WEB_EXT.sub("", _strip_date(product_seg).lower())) if w]
             if listed_year and not landed_years and rest_words and rest_words[-1] in _RECURRING:
                 return False
             # A subject word before "shutdown" is the page's topic, unless it

@@ -1,5 +1,5 @@
 """
-Print the _CLDR_LOCALES and _ISO_REGIONS tables that liveliness/core.py
+Print the _CLDR_LOCALES, _INTERNATIONAL and _ISO_REGIONS tables that liveliness/core.py
 carries, from the Unicode CLDR's published data and the IANA Language Subtag
 Registry.
 
@@ -50,6 +50,17 @@ def main(version):
             pairs.add(p + "-" + region_of[parts[0]])
     print('_CLDR_LOCALES = frozenset("""\n%s\n""".split())'
           % "\n".join(textwrap.wrap(" ".join(sorted(pairs)), 84, break_on_hyphens=False, break_long_words=False)))
+    # Languages official in five or more countries.
+    territories = fetch(version, "supplemental/territoryInfo.json")["supplemental"]["territoryInfo"]
+    official = {}
+    for info in territories.values():
+        for lang, d in info.get("languagePopulation", {}).items():
+            base = lang.split("_")[0]
+            if len(base) == 2 and d.get("_officialStatus") in (
+                    "official", "de_facto_official", "official_regional"):
+                official[base] = official.get(base, 0) + 1
+    print('_INTERNATIONAL = frozenset("%s".split())'
+          % " ".join(sorted(l for l, n in official.items() if n >= 5)))
     # ISO 3166-1 regions as BCP 47 takes them, private use (AA, ZZ, ranges) out.
     text = urllib.request.urlopen(REGISTRY, timeout=30).read().decode("utf-8")
     regions = set()
