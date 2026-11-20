@@ -288,7 +288,10 @@ _DATE_PREFIX = re.compile(r"^" + _BEFORE)
 # Slugs too generic to name a product: a page about, or an id.
 _GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page", "pages",
                      "project", "projects", "tool", "tools", "app", "apps", "index",
-                     "service", "services", "program", "programs", "site"}
+                     "service", "services", "program", "programs", "site",
+                     "overview", "features", "docs", "documentation", "pricing",
+                     "dashboard", "login", "signin", "getstarted", "faq", "contact",
+                     "team", "people", "staff", "help", "support", "download", "downloads"}
 
 
 def _compact(seg):
@@ -387,8 +390,15 @@ def sunset_landing(url, final, name=None):
     for i, seg in enumerate(segs):
         if not seg:
             continue
+        # A slug can carry an ending word at both ends (farewell-widget-
+        # discontinued): the rest is compared with the other one trimmed too.
+        def rest_names_product(m):
+            rest = m.group("rest")
+            trimmed = re.sub(r"^" + _SUNSET_WORDS + r"[-_]|[-_]" + _SUNSET_WORDS + r"$", "",
+                             rest, flags=re.I)
+            return _compact(rest) in products or _compact(trimmed) in products
         m = next((m for m in (_SUNSET_AT_END.match(seg), _SUNSET_AT_START.match(seg))
-                  if m and _compact(m.group("rest")) in products), None)
+                  if m and rest_names_product(m)), None)
         if not m:
             continue
         # A downtime word counts only in the notice's own segment, outside the
