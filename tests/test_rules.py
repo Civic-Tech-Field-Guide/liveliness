@@ -2730,6 +2730,9 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://x.org/2024-report", "https://x.org/news/2024/report-sunset/"),
             ("https://widget.org/en-emea/", "https://foundation.org/news/widget-sunset/"),
             ("https://widget.org/ca-en/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.com/uk-en/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/download", "https://foundation.org/news/widget-sunset/"),
+            ("https://x.org/2024-25-widget", "https://x.org/news/2025-widget-sunset/"),
             ("https://widget.org/fr-int/", "https://foundation.org/news/widget-sunset/"),
             ("https://x.org/2025-widget", "https://x.org/news/2024-25-widget-sunset/"),
             ("https://x.org/2024-widget", "https://x.org/news/2025-01-15-widget-sunset/"),
@@ -2805,6 +2808,8 @@ def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
             ("https://x.org/2024-report.pdf", "https://x.org/news/report-sunset/"),
             ("https://x.org/2024-reports", "https://x.org/news/reports-sunset/"),
             ("https://x.org/2024-indexes", "https://x.org/news/indexes-sunset/"),
+            ("https://x.org/2024-strategies", "https://x.org/news/strategies-sunset/"),
+            ("https://x.org/2024-30-under-30", "https://x.org/news/under-30-sunset/"),
             ("https://x.org/projects/2024-widget", "https://x.org/2023/05/widget-sunset/"),
             ("https://x.org/2024-widget", "https://x.org/2023/05/2024-widget-sunset/"),
             ("https://x.org/2023-annual-report", "https://x.org/news/2024-annual-report-sunset/"),
@@ -2970,6 +2975,7 @@ def test_a_notice_address_keeps_a_page_naming_query():
     assert core._notice_address("https://x.org/a;jsessionid=x/b/?p=1") == "https://x.org/a/b/?p=1"
     assert core._notice_address("https://u:pw@x.org/n?p=1") == "https://x.org/n?p=1"
     assert core._notice_address("https://x.org/?P=101") == "https://x.org/"
+    assert core._notice_address("https://x.org/news/widget;sunset-notice/") == "https://x.org/news/widget;sunset-notice/"
     assert core._notice_address("https://x.org/n/?id=8f3a2c-token") == "https://x.org/n/"
     # With an & present the server reads ;sid= as part of lang's value, so the
     # whole pair goes.
@@ -2980,7 +2986,8 @@ def test_a_notice_address_keeps_a_page_naming_query():
 def test_locales_follow_bcp47_codes():
     from liveliness import core
     for seg in ("en", "pt-br", "it-it", "es-419", "zh-hant", "sr-latn-rs", "en_GB", "en-uk",
-                "en-eu", "zh-chs", "zh-tw", "fr-ca", "en-sa", "en-mx", "lo-la", "es-la"):
+                "en-eu", "zh-chs", "zh-tw", "fr-ca", "en-sa", "en-mx", "lo-la", "es-la",
+                "uk-en", "tr-en", "kr-en"):
         assert core._is_locale_segment(seg), seg
     for seg in ("ar-vr", "my-data", "it-help", "en-xx", "zz", "zh-abcd", "en-aa", "fr-zzzz",
                 "to-do", "my-id", "is-it", "my-ai", "pi-ai", "sr-ai", "ca-valencia", "pt-2030",

@@ -286,14 +286,15 @@ _DOWNTIME = re.compile(r"(?:^|[-_/])(?:maintenance|planned|scheduled|outage|down
 _GOV_SHUTDOWN = re.compile(r"(?:government|federal)[-_]shut[-_]?down", re.I)
 # Things that come out every year, so a dated one is that year's edition.
 _RECURRING = {"report", "annualreport", "survey", "agenda", "conference", "summit",
-              "review", "plan", "budget", "strategy", "index", "census", "festival"}
+              "review", "plan", "budget", "strategy", "index", "census", "festival",
+              "summary"}
 # Function words dropped before the product is compared: farewell-to-the-widget.
 _FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
 _INDEX_FILE = re.compile(r"^(?:index|default|home)(?:\.[a-z0-9]{1,5})?$", re.I)
 # A year, optionally a month and day (2024-05-, 2024-05-01-), or a school or
 # fiscal year (2024-25-).
 _DATE_PREFIX = re.compile(r"^(\d{4})(?:[-_](?:0[1-9]|1[0-2])(?:[-_](?:0[1-9]|[12]\d|3[01]))?"
-                          r"|[-_]\d{2})?[-_]")
+                          r"|[-_](\d{2}))?[-_]")
 
 
 def _is_year(text):
@@ -304,7 +305,13 @@ def _is_year(text):
 def _strip_date(seg):
     """A leading date taken off a slug (2024-widget), but not a number in a name (2090-agenda)."""
     m = _DATE_PREFIX.match(seg)
-    return seg[m.end():] if m and _is_year(m.group(1)) else seg
+    if not m or not _is_year(m.group(1)):
+        return seg
+    # A two-digit tail is a school year only when it is the next year
+    # (2024-25); 2024-30-under-30 keeps its 30.
+    if m.group(2) and int(m.group(2)) != (int(m.group(1)) + 1) % 100:
+        return seg[len(m.group(1)) + 1:]
+    return seg[m.end():]
 # Subjects that put "shutdown" at the end of a live page's address.
 _SHUTDOWN_SUBJECTS = {"internet", "mobile", "socialmedia", "network", "government",
                       "tracker", "map", "data"}
@@ -314,7 +321,7 @@ _SHUTDOWN_WORD = re.compile(r"[-_]shut[-_]?down" + _AFTER + _EXT + r"$", re.I)
 _SECTIONS = {"news", "blog", "tools", "tool", "projects", "project", "programs",
              "program", "programmes", "services", "service", "pages", "page", "data",
              "internet", "team", "people", "staff", "work", "ourwork", "apps",
-             "features", "downloads", "download", "resources", "events",
+             "resources", "events",
              "initiatives", "products", "solutions"}
 # Slugs too generic to name a product: a page about, or an id.
 _GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page", "pages",
@@ -465,7 +472,8 @@ ro rs ru rw sa sb sc sd se sg sh si sj sk sl sm sn so sr ss st sv sx sy sz ta tc
 tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug um un us uy uz va vc ve vg vi vn vu
 wf ws ye yt za zm zw
 """.split())
-# Languages official in five or more countries in CLDR 49's territory data
+# Languages official, nationally or regionally, in five or more countries in
+# CLDR 49's territory data
 # (English, Arabic, Spanish, French and the like), counted once per country. Sites pair these with any
 # country (en-sa, es-us), so such a pair counts even where CLDR has no locale
 # for it. A language official in one country (Tongan, Burmese) does not get
@@ -510,6 +518,11 @@ def _is_locale_segment(seg):
         # that country (ca-en for en-ca, be-fr, ch-de; not is-it).
         if parts[1] + "-" + parts[0] in _CLDR_LOCALES:
             return True
+        # English after any country is the common case on its own (uk-en,
+        # tr-en, kr-en); other languages need CLDR's pair, so is-it stays a
+        # name.
+        if parts[1] == "en" and _LOCALE_ALIASES.get(parts[0], parts[0]) in _ISO_REGIONS:
+            return True
     parts = [parts[0]] + [_LOCALE_ALIASES.get(x, x) for x in parts[1:]]
     return "-".join(parts) in _CLDR_LOCALES
 
@@ -553,7 +566,7 @@ def _notice_address(url):
     pairs = [pair for pair in (p.query.split("&") if "&" in p.query else p.query.split(";"))
              if pair and keep(pair)]
     # Path parameters (;jsessionid=) say who arrived, never which page.
-    path = re.sub(r";[^/]*", "", p.path)
+    path = re.sub(r";[A-Za-z_][\w.-]*=[^/;]*", "", p.path)
     # A user name or password before the host is never published.
     netloc = p.netloc.rsplit("@", 1)[-1]
     return p._replace(netloc=netloc, path=path, params="", query=separator.join(pairs),
@@ -711,7 +724,11 @@ def sunset_landing(url, final, name=None):
                         return False   # published before the item existed
                     if int(x) == int(listed_year.group(1)):
                         landed_years.append(x)
-            if listed_year and landed_years and listed_year.group(1) not in landed_years:
+            listed_years = {listed_year.group(1)} if listed_year else set()
+            school = re.match(r"(\d{4})[-_](\d{2})[-_]", product_seg)
+            if school and int(school.group(2)) == (int(school.group(1)) + 1) % 100:
+                listed_years.add(str(int(school.group(1)) + 1))
+            if listed_year and landed_years and not listed_years & set(landed_years):
                 return False
             # An undated notice fits a dated listing unless the rest of its
             # name is something that comes out every year (2024-report, 2024-impact-report).
@@ -720,7 +737,8 @@ def sunset_landing(url, final, name=None):
             last = rest_words[-1] if rest_words else ""
             if listed_year and not landed_years and (
                     last in _RECURRING or (last.endswith("s") and last[:-1] in _RECURRING)
-                    or (last.endswith("es") and last[:-2] in _RECURRING)):
+                    or (last.endswith("es") and last[:-2] in _RECURRING)
+                    or (last.endswith("ies") and last[:-3] + "y" in _RECURRING)):
                 return False
             # A subject word before "shutdown" is the page's topic, unless it
             # is the listed product's own name and the page sits under a
