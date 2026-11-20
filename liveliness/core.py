@@ -284,7 +284,6 @@ _DOWNTIME = re.compile(r"(?:^|[-_/])(?:maintenance|planned|scheduled|outage|down
 # A government shutdown names itself beside the word, in the same segment
 # (government-shutdown, federal-shutdown); /government/news/ is a section.
 _GOV_SHUTDOWN = re.compile(r"(?:government|federal)[-_]shut[-_]?down", re.I)
-_FUNDING_LAPSE = re.compile(r"(?:^|[-_/])(?:lapse|appropriations|furlough)(?=[-_/.]|$)", re.I)
 # Function words dropped before the product is compared: farewell-to-the-widget.
 _FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
 _INDEX_FILE = re.compile(r"^(?:index|default|home)(?:\.[a-z0-9]{1,5})?$", re.I)
@@ -293,6 +292,9 @@ _DATE_PREFIX = re.compile(r"^" + _BEFORE)
 _SHUTDOWN_SUBJECTS = {"internet", "mobile", "socialmedia", "network", "government",
                       "tracker", "map", "data"}
 _SHUTDOWN_WORD = re.compile(r"[-_]shut[-_]?down" + _AFTER + _EXT + r"$", re.I)
+# The pages that stand for a site's front page: /about/ and its kin, not a
+# section such as /news/ or /tools/.
+_FRONT_PAGES = {"about", "aboutus", "home", "index", "whoweare"}
 # Slugs too generic to name a product: a page about, or an id.
 _GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page", "pages",
                      "project", "projects", "tool", "tools", "app", "apps", "index",
@@ -312,6 +314,15 @@ def _compact(seg):
 
 
 _SCRIPTS = {"hans", "hant", "latn", "cyrl", "arab", "deva", "jpan", "kore"}
+
+
+# Region and script locales common enough in site paths to read a lone one as
+# a language front page. A two-part slug outside this list (ar-vr, eu-ai) is a
+# product name.
+_COMMON_LOCALES = {"en-us", "en-gb", "en-ca", "en-au", "en-in", "pt-br", "pt-pt", "es-es",
+                   "es-mx", "es-ar", "fr-fr", "fr-ca", "fr-be", "de-de", "de-at", "de-ch",
+                   "it-it", "nl-nl", "nl-be", "zh-cn", "zh-tw", "zh-hk", "zh-hans", "zh-hant",
+                   "ja-jp", "ko-kr", "ru-ru", "pl-pl", "sv-se", "tr-tr"}
 
 
 def _is_locale_segment(seg):
@@ -367,7 +378,9 @@ def sunset_landing(url, final, name=None):
     # (/en/, /pt-br/, /zh-hant/): my-data and it-help are product names.
     named = [seg for seg in listed_segs
              if not _INDEX_FILE.match(seg)
-             and not ((len(listed_segs) > 1 or len(seg) > 2) and _is_locale_segment(seg))]
+             and not (_is_locale_segment(seg)
+                      and (len(seg) == 2 and len(listed_segs) > 1
+                           or seg.lower().replace("_", "-") in _COMMON_LOCALES))]
 
     def usable(p):
         return len(p) >= 3 and not p.isdigit() and p not in _GENERIC_PRODUCTS
@@ -393,7 +406,7 @@ def sunset_landing(url, final, name=None):
         if p not in _GENERIC_PRODUCTS:
             break
     # A front page, alone, in one language, or its about page (/en/about/).
-    front_page = all(_is_language_root("/" + seg) or _compact(seg) in _GENERIC_PRODUCTS
+    front_page = all(_is_language_root("/" + seg) or _compact(seg) in _FRONT_PAGES
                      for seg in named)
     if not products and front_page:
         # A listed front page, alone or in one language (/en/):
@@ -437,9 +450,11 @@ def sunset_landing(url, final, name=None):
             rest = m.group("rest")
             # A dated item only matches a notice for its own year: the 2023
             # report is not the 2024 report. A notice with no year still counts.
+            # A dated item only matches a notice that names its own year: the
+            # 2023 report is not the 2024 report, nor a "report" with no year.
             listed_year = re.match(r"(\d{4})[-_]", product_seg)
             landed_years = re.findall(r"(?<!\d)(\d{4})(?!\d)", seg)
-            if listed_year and landed_years and listed_year.group(1) not in landed_years:
+            if listed_year and listed_year.group(1) not in landed_years:
                 return False
             # A subject word before "shutdown" is the page's topic, unless it
             # is the listed product's own name and the page sits under a
@@ -464,7 +479,7 @@ def sunset_landing(url, final, name=None):
                           + [x for x in segs[i + 1:] if not _is_language_root("/" + x)])
         # A funding lapse names itself anywhere in the path
         # (/lapse-in-appropriations/widget-shutdown/).
-        if _DOWNTIME.search(around) or _FUNDING_LAPSE.search(around) or _GOV_SHUTDOWN.search(seg):
+        if _DOWNTIME.search(around) or _GOV_SHUTDOWN.search(seg):
             continue
         # A match under a people section is a person leaving, not a product.
         if any(
@@ -4247,7 +4262,8 @@ def score_project(project, budget_s=None):
                    "notice, so the scorer counts nothing dated on that page%s" % (
                        _notice_address(_PAGE_FINAL.get(website_url)) or notice,
                        ", and no feed or social account, since those are usually the "
-                       "organization's" if (project.feeds or all_social_urls) else ""))
+                       "organization's" if (project.feeds or all_social_urls
+                                            or url_class == "homepage") else ""))
 
     # The page saying it has finished outranks everything above it, including a
     # recent launch: something added to the directory in March and closed in July
