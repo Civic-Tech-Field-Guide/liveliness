@@ -269,9 +269,13 @@ _EXT = r"(?:\.[a-z0-9]{1,5})?"
 # A notice slug may carry a date before the product or a year or notice word
 # after the ending word: 2024-widget-sunset, widget-sunset-2024.
 _BEFORE = r"(?:\d{4}(?:[-_]\d{2}){0,2}[-_])?"
-_AFTER = r"(?:[-_](?:\d{4}|notice|announcement|update))*"
+_AFTER = r"(?:[-_](?:\d{4}(?:[-_]\d{2}){0,2}|notice|announcement|update|faq))*"
 _SUNSET_AT_END = re.compile(r"^" + _BEFORE + r"(?P<rest>.+?)[-_]" + _SUNSET_WORDS + _AFTER + _EXT + r"$", re.I)
-_SUNSET_AT_START = re.compile(r"^" + _BEFORE + _SUNSET_WORDS + r"[-_](?P<rest>.+?)" + _AFTER + _EXT + r"$", re.I)
+# At the start of a segment the bare word "sunset" is usually a place
+# (sunset-district, sunset-park), so only its inflected forms count there.
+_SUNSET_START_WORDS = (r"(?:sunsetted|sunsetting|shut[-_]?downs?|discontinued|"
+                       r"discontinuation|end[-_]of[-_]life|farewell)")
+_SUNSET_AT_START = re.compile(r"^" + _BEFORE + _SUNSET_START_WORDS + r"[-_](?P<rest>.+?)" + _AFTER + _EXT + r"$", re.I)
 # Words that make a shutdown a planned outage rather than an ending, anywhere
 # in the landed path.
 _DOWNTIME = re.compile(r"(?:^|[-_/])(?:maintenance|planned|scheduled|outage|downtime|"
@@ -321,19 +325,24 @@ def sunset_landing(url, final, name=None):
             _registrable(urlparse(final).hostname) == _registrable(urlparse(url).hostname):
         return None   # the listing itself is the notice: nothing moved
     listed_segs = [seg for seg in listed_path.split("/") if seg]
-    named = [seg for seg in listed_segs
-             if not _INDEX_FILE.match(seg) and not _is_language_root("/" + seg)]
+    # A language code counts only as the first segment (/en/widget/): my-data
+    # and it-help are product names, not locales.
+    named = [seg for i, seg in enumerate(listed_segs)
+             if not _INDEX_FILE.match(seg)
+             and not (i == 0 and len(listed_segs) > 1 and _is_language_root("/" + seg))]
 
     def usable(p):
         return len(p) >= 3 and not p.isdigit() and p not in _GENERIC_PRODUCTS
 
     products = set()
-    # The last specific segment, walking back past generic ones (/widget/app).
+    # The last two specific segments, walking back past generic ones: a deep
+    # link such as /widget/overview names the product one level up.
     for seg in reversed(named):
         p = _compact(_DATE_PREFIX.sub("", unquote(seg)))
         if usable(p):
             products.add(p)
-            break
+            if len(products) == 2:
+                break
     if not named:
         # A listed front page: the product is the site's own name, read from
         # its registered domain (widget.org) or the listing's name.
@@ -3671,7 +3680,8 @@ def score_project(project, budget_s=None):
         get_page_cached(website_url)
         notice = sunset_landing(website_url, _PAGE_FINAL.get(website_url), name)
         if notice:
-            _log(f"    website  → redirects to what looks like a shutdown notice: {notice}")
+            _log(f"    website  → redirects to what looks like a shutdown notice: "
+                 f"{_PAGE_FINAL.get(website_url)}")
 
     # ── GitHub ───────────────────────────────────────────────────────────────
     gh = check_github(project.repo)
@@ -4121,7 +4131,8 @@ def score_project(project, budget_s=None):
                 else ", leaves Status for a person")
         why.append("The listed address now redirects to %s, which reads as a shutdown "
                    "notice, so the scorer counts nothing dated on that page%s, and %s" % (
-                       notice, held, "queues the page for a reading" if pending_adjudication
+                       _PAGE_FINAL.get(website_url) or notice, held,
+                       "queues the page for a reading" if pending_adjudication
                        else "could not queue the page for a reading"))
 
     # The page saying it has finished outranks everything above it, including a
@@ -4284,15 +4295,15 @@ def score_project(project, budget_s=None):
     elif no_signals:
         why = ["Nothing on this listing could be checked: no working website address, "
                "no code repository, no feed and no reachable social accounts."]
+    elif notice and not page_closed:
+        why.append("Reported as Unknown until a person reads the notice."
+                   if pending_adjudication else
+                   "Reported as Unknown: the notice could not be queued for a reading.")
     elif undated:
         why.append("Nothing dated was found in code, feeds or social posts, so there is "
                    "no evidence either way about whether this project is still running. "
                    "A reachable website only shows the address still resolves. Reported "
                    "as Unknown rather than scored.")
-    elif score is None:
-        why.append("Reported as Unknown until a person reads the notice."
-                   if pending_adjudication else
-                   "Reported as Unknown: the notice could not be queued for a reading.")
     else:
         why.append(f"Total: {score:g} out of 100 - {activity_status}")
     breakdown = "\n".join(why)
