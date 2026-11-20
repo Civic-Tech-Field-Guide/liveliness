@@ -2659,94 +2659,92 @@ def test_landed_url_takes_check_parked(monkeypatch):
     assert core.landed_url("https://x.org/", check_parked=False) == "https://www.x.org/"
 
 
+
 # ── A retired product's address pointed at its shutdown notice ────────────────
 
-def test_a_page_redirected_to_its_own_shutdown_notice_is_a_closure():
+def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
     from liveliness import core
     url = "https://foundation.mozilla.org/en/privacynotincluded/"
     notice = "https://www.mozillafoundation.org/en/nothing-personal/privacy-not-included-sunset/"
     assert core.sunset_landing(url, notice) == "/en/nothing-personal/privacy-not-included-sunset/"
-    for final in ("https://x.org/news/foo-shutdown", "https://x.org/blog/sunsetting_foo.html",
-                  "https://x.org/foo-end-of-life/", "https://x.org/farewell-foo",
-                  "https://x.org/foo-shutdown.php", "https://x.org/foo_end_of_life/",
-                  "https://x.org/foo-shutdowns/", "https://x.org/farewell-to-foo/"):
-        assert core.sunset_landing("https://x.org/foo", final), final
+    for listed, final in (
+            ("https://x.org/foo", "https://x.org/news/foo-shutdown"),
+            ("https://x.org/foo", "https://x.org/blog/sunsetting_foo.html"),
+            ("https://x.org/foo", "https://x.org/foo_end_of_life/"),
+            ("https://x.org/foo", "https://x.org/foo-shutdowns/"),
+            ("https://x.org/foo", "https://x.org/farewell-to-foo/"),
+            ("https://x.org/foo", "https://x.org/foo-shutdown.php"),
+            ("https://x.org/widget/index.html", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/widget/en/", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/widget", "https://x.org/news/widget-sunset-2024/"),
+            ("https://x.org/widget", "https://x.org/news/2024-widget-sunset/"),
+            ("https://x.org/widget", "https://x.org/widget-shutdown-notice"),
+            ("https://x.org/ai", "https://x.org/ai-sunset/")):
+        assert core.sunset_landing(listed, final), (listed, final)
 
 
-def test_a_shutdown_word_that_is_the_subject_or_names_another_thing_is_not_a_closure():
+def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
     from liveliness import core
-    url = "https://x.org/foo"
-    for final in ("https://x.org/sunsetboulevard", "https://x.org/closed-captioning",
-                  "https://x.org/retired-teachers", "https://x.org/projects/foo",
-                  "https://web.archive.org/web/2020/https://x.org/foo-sunset", url, None,
-                  "https://x.org/campaigns/internet-shutdown/",
-                  "https://registrar.example/domain-farewell/",
-                  "https://x.org/neighborhoods/sunset/",
-                  "https://x.org/news/foo-shutdown-maintenance-weekend/",
-                  "https://x.org/planned-foo-shutdown/"):
-        assert not core.sunset_landing(url, final), final
-    # A shutdown word inside the segment is its subject, not an ending.
-    assert not core.sunset_landing("https://x.org/tracker", "https://x.org/government-shutdown-tracker/")
-    assert not core.sunset_landing("https://x.org/2024/report", "https://x.org/blog/2024-sunset-photos/")
-    # A word of the listing's section is not the product.
-    assert not core.sunset_landing("https://x.org/programs/widget",
-                                   "https://x.org/blog/farewell-to-our-programs-team/")
-    # A campaign about shutdowns keeps its name in the address it moved to.
-    assert not core.sunset_landing("https://x.org/keepiton", "https://x.org/campaigns/internet-shutdown/")
-    # A listing that already points at the notice moved nowhere.
-    assert not core.sunset_landing("https://x.org/foo-sunset", "https://x.org/foo-sunset/")
-    # A front page names no product to match.
-    assert not core.sunset_landing("https://x.org/", "https://x.org/news/site-sunset/")
+    for listed, final in (
+            ("https://x.org/foo", "https://x.org/sunsetboulevard"),
+            ("https://x.org/foo", "https://x.org/closed-captioning"),
+            ("https://x.org/foo", "https://x.org/projects/foo"),
+            ("https://x.org/foo", "https://web.archive.org/web/2020/https://x.org/foo-sunset"),
+            ("https://x.org/foo", None),
+            ("https://x.org/foo", "https://x.org/foo"),
+            ("https://x.org/foo", "https://x.org/neighborhoods/sunset/"),
+            ("https://x.org/foo", "https://x.org/news/foo-shutdown-maintenance-weekend/"),
+            ("https://x.org/foo", "https://x.org/foo-shutdown/maintenance"),
+            ("https://x.org/tracker", "https://x.org/government-shutdown-tracker/"),
+            ("https://x.org/2024/report", "https://x.org/blog/2024-sunset-photos/"),
+            ("https://x.org/programs/widget", "https://x.org/blog/farewell-to-our-programs-team/"),
+            ("https://x.org/keepiton", "https://x.org/campaigns/internet-shutdown/"),
+            ("https://x.org/foo-sunset", "https://x.org/foo-sunset/"),
+            ("https://x.org/", "https://x.org/news/site-sunset/")):
+        assert not core.sunset_landing(listed, final), (listed, final)
 
 
-def test_score_project_caps_a_listing_that_redirects_to_its_shutdown_notice(monkeypatch):
-    from liveliness import core
+def _notice_site(monkeypatch, core, landed):
     _undated_live_site(monkeypatch, core)
-    url = "https://x.org/widget/"
-    page = "<title>Widget has moved</title>" + "<p>We are continuing that work elsewhere.</p>" * 20
+    page = ("<title>Widget has moved</title><p>Published Aug. 11, 2026</p>"
+            + "<p>We are continuing that work at our magazine.</p>" * 20 + "<p>© 2026</p>")
     def fetch(u):
-        core._PAGE_FINAL[u] = "https://x.org/news/widget-sunset/"
+        core._PAGE_FINAL[u] = landed
         return page, {}
     monkeypatch.setattr(core, "get_page_cached", fetch)
-    monkeypatch.setattr(core, "latest_blog_date", lambda *a: _now())
-    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
-    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: None)
-    result = core.score_project(Project(name="x", website=url))
-    assert result["score"] <= core.CLOSED_CAP
-    assert core.REDIRECT_CLOSURE_WORDING in result["breakdown"]
-    assert core.CLOSURE_SOURCE_WORDING not in result["breakdown"]
-    # An address alone caps the score but never writes Inactive.
-    assert result["status"] != "Inactive"
+    monkeypatch.setattr(core, "ADJUDICATE", True)
+    def never(*a, **k):
+        raise AssertionError("nothing on a notice dates the product")
+    monkeypatch.setattr(core, "latest_news_date", never)
+    monkeypatch.setattr(core, "page_date_signals", never)
+    monkeypatch.setattr(core, "discover_social_links", never)
+    monkeypatch.setattr(core, "sitemap_date", never)
+    monkeypatch.setattr(core, "wayback_change_date", never)
+    seen = []
+    monkeypatch.setattr(core, "latest_blog_date", lambda feeds, site, cls: seen.append(site))
+    return seen
+
+
+def test_a_shutdown_notice_dates_nothing_and_goes_to_a_reading(monkeypatch):
+    from liveliness import core
+    seen = _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
+    assert seen == [None]          # no feed discovered from the notice
+    assert result["adjudication"] and "has moved" in result["adjudication"]["text"]
+    assert result["status"] != "Active"
     assert "widget-sunset" in result["breakdown"]
 
 
-def test_index_files_locales_and_trailing_years_still_match():
-    from liveliness import core
-    assert core.sunset_landing("https://x.org/widget/index.html", "https://x.org/news/widget-sunset/")
-    assert core.sunset_landing("https://x.org/widget/en/", "https://x.org/news/widget-sunset/")
-    assert core.sunset_landing("https://x.org/widget", "https://x.org/news/widget-sunset-2024/")
-    assert core.sunset_landing("https://x.org/widget", "https://x.org/widget-shutdown-notice")
-
-
-def test_the_notice_has_to_say_it_moved():
-    from liveliness import core
-    assert core.notice_says_it_moved("Privacy Not Included Has Moved. We are continuing that work at our magazine.")
-    assert core.notice_says_it_moved("Widget has been sunset as of June.")
-    assert not core.notice_says_it_moved("Track internet shutdowns around the world in real time.")
-    assert not core.notice_says_it_moved("Sunrise and sunset times for any city.")
-
-
-def test_a_shutdown_tracker_that_redirects_to_its_own_name_is_not_capped(monkeypatch):
+def test_an_ordinary_redirect_is_still_dated(monkeypatch):
     from liveliness import core
     _undated_live_site(monkeypatch, core)
-    page = "<title>Internet shutdown tracker</title>" + "<p>Track internet shutdowns around the world.</p>" * 20
+    calls = []
+    monkeypatch.setattr(core, "page_date_signals", lambda *a, **k: calls.append(1) or [])
     def fetch(u):
-        core._PAGE_FINAL[u] = "https://x.org/internet-shutdown/"
-        return page, {}
+        core._PAGE_FINAL[u] = "https://x.org/projects/widget/"
+        return "<title>Widget</title>" + "<p>Widget helps cities.</p>" * 20, {}
     monkeypatch.setattr(core, "get_page_cached", fetch)
-    monkeypatch.setattr(core, "latest_blog_date", lambda *a: _now())
     monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
     monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: None)
-    result = core.score_project(Project(name="x", website="https://x.org/internet"))
-    assert result["score"] > core.CLOSED_CAP
-    assert core.REDIRECT_CLOSURE_WORDING not in result["breakdown"]
+    core.score_project(Project(name="Widget", website="https://x.org/tools/widget/"))
+    assert calls
