@@ -300,7 +300,9 @@ _SECTIONS = {"news", "blog", "tools", "tool", "projects", "project", "programs",
              "features", "downloads", "download", "resources", "events",
              "initiatives", "products", "solutions"}
 # Slugs too generic to name a product: a page about, or an id.
-_GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page", "pages",
+_GENERIC_PRODUCTS = {"programmes", "events", "resources", "initiatives", "products",
+                     "solutions",
+                     "about", "home", "news", "blog", "data", "internet", "page", "pages",
                      "project", "projects", "tool", "tools", "app", "apps", "index",
                      "service", "services", "program", "programs", "site",
                      "overview", "features", "docs", "documentation", "pricing",
@@ -325,16 +327,16 @@ def _compact(seg):
 # regions plus the registry's own additions such as EU, UN M.49 areas such as
 # 419, and ISO 15924 scripts.
 _BCP47_REGIONS = frozenset("""
-aa ac ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj bl
-bm bn bo bq br bs bt bv bw by bz ca cc cd cf cg ch ci ck cl cm cn co cp cq cr cu cv
-cw cx cy cz de dg dj dk dm do dz ea ec ee eg eh er es et eu ez fi fj fk fm fo fr ga
-gb gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu ic id ie il
-im in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz la lb lc li lk lr
-ls lt lu lv ly ma mc md me mf mg mh mk ml mm mn mo mp mq mr ms mt mu mv mw mx my mz
-na nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk pl pm pn pr ps pt pw py qa
-re ro rs ru rw sa sb sc sd se sg sh si sj sk sl sm sn so sr ss st sv sx sy sz ta tc
-td tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug um un us uy uz va vc ve vg vi vn
-vu wf ws ye yt za zm zw zz
+ac ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj bl bm
+bn bo bq br bs bt bv bw by bz ca cc cd cf cg ch ci ck cl cm cn co cp cq cr cu cv cw
+cx cy cz de dg dj dk dm do dz ea ec ee eg eh er es et eu ez fi fj fk fm fo fr ga gb
+gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu ic id ie il im
+in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz la lb lc li lk lr ls
+lt lu lv ly ma mc md me mf mg mh mk ml mm mn mo mp mq mr ms mt mu mv mw mx my mz na
+nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk pl pm pn pr ps pt pw py qa re
+ro rs ru rw sa sb sc sd se sg sh si sj sk sl sm sn so sr ss st sv sx sy sz ta tc td
+tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug um un us uy uz va vc ve vg vi vn vu
+wf ws ye yt za zm zw
 """.split())
 _BCP47_AREAS = frozenset("""
 001 002 003 005 009 011 013 014 015 017 018 019 021 029 030 034 035 039 053 054 057
@@ -354,7 +356,6 @@ prti psin ranj rjng rohg roro runr samr sara sarb saur seal sgnw shaw shrd shui 
 sidt sind sinh sogd sogo sora soyo sund sunu sylo syrc syre syrj syrn tagb takr tale
 talu taml tang tavt tayo telu teng tfng tglg thaa thai tibt tirh tnsa todr tols toto
 tutg ugar vaii visp vith wara wcho wole xpeo xsux yezi yiii zanb zinh zmth zsye zsym
-zxxx zyyy zzzz
 """.split())
 _BCP47 = re.compile(r"([a-z]{2})(?:[-_]([a-z]{4}))?(?:[-_]([a-z]{2}|\d{3}))?", re.I)
 
@@ -374,18 +375,18 @@ def _is_locale_segment(seg):
     return not region or region in _BCP47_REGIONS or region in _BCP47_AREAS
 
 
-# Advertising and email-campaign tags, which say how someone arrived and never
-# which page they reached: Google (utm_*, gclid, dclid, gbraid, wbraid, _gl),
-# Meta (fbclid), Microsoft (msclkid), Yandex (yclid), Instagram (igshid),
-# Mailchimp (mc_*), HubSpot (_hs*), Marketo (mkt_tok).
-_AD_TRACKING = re.compile(r"^(?:utm_\w+|gclid|dclid|gbraid|wbraid|_gl|_ga|fbclid|msclkid|"
-                          r"yclid|igshid|mc_\w+|_hs\w+|mkt_tok)$", re.I)
+# Query keys that name the page itself on common publishing systems
+# (WordPress ?p= and ?page_id=, Drupal ?q=node/, ?id=, ?lang=). Anything else
+# in a query (session ids, tokens, a subscriber's email, campaign tags) says
+# who arrived and how, and is never published.
+_PAGE_KEYS = {"p", "page_id", "post", "post_id", "id", "article", "story", "node",
+              "nid", "lang", "hl", "locale"}
 
 
 def _notice_address(url):
     """
-    A notice's address without tracking tags or fragment, for publishing. The
-    rest of the query stays: on some sites (?p=101) it is the page.
+    A notice's address for publishing: its fragment goes, and of its query
+    only the keys that name the page (_PAGE_KEYS) stay, as sent.
     """
     if not url:
         return url
@@ -394,7 +395,7 @@ def _notice_address(url):
     # again (RFC 3986 section 6.2.2): a server may treat %20 and + or a bare
     # key and key= differently, and the address has to keep reaching the page.
     pairs = [pair for pair in p.query.split("&")
-             if pair and not _AD_TRACKING.match(unquote(pair.split("=", 1)[0]))]
+             if pair and unquote(pair.split("=", 1)[0]).lower() in _PAGE_KEYS]
     return p._replace(query="&".join(pairs), fragment="").geturl()
 
 
@@ -2466,12 +2467,12 @@ na nv nd ne ng nb nn no ii nr oc oj cu om or os pa pi fa pl ps pt qu rm rn ro
 ru sa sc sd se sm sg sr gd sn si sk sl so st es su sw ss sv ta te tg th ti bo
 tk tl tn to tr ts tt tw ty ug uk ur uz ve vi vo wa cy wo fy xh yi yo za zu
 """.split())
-_LANGUAGE_ROOT = re.compile(r"^/([a-z]{2})(?:[-_][a-z]{2,4})?$", re.I)
 
 
 def _is_language_root(path):
-    m = _LANGUAGE_ROOT.match(path)
-    return bool(m) and m.group(1).lower() in _LANGUAGE_CODES
+    """A path that is one BCP 47 locale segment and nothing else: /en, /pt-br."""
+    m = re.fullmatch(r"/([^/]+)", path or "")
+    return bool(m) and _is_locale_segment(m.group(1))
 
 
 def _path_prefix(url):

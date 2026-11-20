@@ -29,13 +29,16 @@ def main():
     regions, areas, scripts = [], [], []
     for f in records(text):
         tag = f.get("Subtag", "")
-        if "Deprecated" in f or ".." in tag:
+        # Deprecated codes, private-use ranges and codes (AA, ZZ, Qaaa..Qabx),
+        # and the placeholder scripts for unwritten, common and unknown text.
+        if ("Deprecated" in f or ".." in tag or f.get("Description") == "Private use"
+                or tag in ("Zxxx", "Zyyy", "Zzzz")):
             continue
         if f.get("Type") == "region":
             (areas if tag.isdigit() else regions).append(tag.lower())
         elif f.get("Type") == "script":
             scripts.append(tag.lower())
-    print(text.split("\n", 1)[0])
+    print("# " + text.split("\n", 1)[0])
     for name, values in (("_BCP47_REGIONS", regions), ("_BCP47_AREAS", areas),
                          ("_BCP47_SCRIPTS", scripts)):
         print('%s = frozenset("""\n%s\n""".split())' % (
