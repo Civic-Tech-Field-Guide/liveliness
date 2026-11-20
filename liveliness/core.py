@@ -4045,8 +4045,7 @@ def score_project(project, budget_s=None):
                        "activity is, it counts for at most 15")
     else:
         why.append(("No dated activity found in code (0)" if project.repo else
-                    "No code repository to date it, and the notice page, feeds and "
-                    "social accounts are not counted (0)") if notice else
+                    "No code repository to date it (0)") if notice else
                    "No dated activity found in code, feeds, social posts or on the "
                    "project's own page (0)")
 
@@ -4351,9 +4350,8 @@ def score_project(project, budget_s=None):
         why = ["Nothing on this listing could be checked: no working website address, "
                "no code repository, no feed and no reachable social accounts."]
     elif undated and notice:
-        why.append("Nothing dated was found, so there is no "
-                   "evidence either way about whether this project is still running. "
-                   "Reported as Unknown rather than scored.")
+        why.append("The notice is the only evidence about this project, and it is "
+                   "not scored. Reported as Unknown rather than scored.")
     elif undated:
         why.append("Nothing dated was found in code, feeds or social posts, so there is "
                    "no evidence either way about whether this project is still running. "
