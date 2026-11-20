@@ -290,7 +290,10 @@ _RECURRING = {"report", "annualreport", "survey", "agenda", "conference", "summi
 # Function words dropped before the product is compared: farewell-to-the-widget.
 _FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
 _INDEX_FILE = re.compile(r"^(?:index|default|home)(?:\.[a-z0-9]{1,5})?$", re.I)
-_DATE_PREFIX = re.compile(r"^(\d{4})(?:[-_]\d{2}){0,2}[-_]")
+# A year, optionally a month and day (2024-05-, 2024-05-01-), or a school or
+# fiscal year (2024-25-).
+_DATE_PREFIX = re.compile(r"^(\d{4})(?:[-_](?:0[1-9]|1[0-2])(?:[-_](?:0[1-9]|[12]\d|3[01]))?"
+                          r"|[-_]\d{2})?[-_]")
 
 
 def _is_year(text):
@@ -474,6 +477,9 @@ _INTERNATIONAL = frozenset("ar de en es fr it nl pt ru zh".split())
 # Microsoft names for simplified and traditional Chinese.
 _LOCALE_ALIASES = {"uk": "gb", "eu": "150", "la": "419", "ww": "001", "int": "001",
                    "chs": "hans", "cht": "hant"}
+# UN M.49 area codes CLDR uses as regions (001 world, 150 Europe, 419 Latin
+# America and the like), taken from the CLDR table so pt-2030 stays a name.
+_CLDR_AREAS = frozenset(t.split("-")[-1] for t in _CLDR_LOCALES if t.split("-")[-1].isdigit())
 # Business regions sites put after a language for a group of markets (en-emea,
 # en-apac, es-latam). No standard has codes for them, so they are named here.
 _MARKET_REGIONS = {"emea", "apac", "ap", "latam", "row", "mena", "dach", "nordics"}
@@ -498,7 +504,7 @@ def _is_locale_segment(seg):
         # A widely used language with any real region, market or CLDR area
         # code (en-sa, fr-int, es-ww, en-emea).
         if lang in _INTERNATIONAL and (region in _ISO_REGIONS or region in _MARKET_REGIONS
-                                       or region.isdigit()):
+                                       or region in _CLDR_AREAS):
             return True
         # Country first, then the language, where CLDR has that language in
         # that country (ca-en for en-ca, be-fr, ch-de; not is-it).
@@ -531,7 +537,7 @@ def _notice_address(url):
     # key and key= differently, and the address has to keep reaching the page.
     def keep(pair):
         key, _, value = pair.partition("=")
-        key = unquote(key).lower()
+        key = unquote(key)       # keys are case-sensitive: ?P= is not WordPress's ?p=
         if key not in _PAGE_KEYS:
             return False
         if key == "q":
@@ -616,7 +622,10 @@ def sunset_landing(url, final, name=None):
             continue   # a version (/widget/v1) names the product above it
         p = _compact(_strip_date(unquote(seg)))
         whole = _compact(_strip_date(unquote(seg)), drop_filler=False)
-        if not usable(p) and usable(whole):
+        # "our" in front of a section word is still the section (our-tools);
+        # "a" or "the" makes a name (a-team).
+        ours = re.match(r"our[-_]", seg, re.I) and (p in _GENERIC_PRODUCTS or p in _SECTIONS)
+        if not usable(p) and not ours and usable(whole):
             p = whole          # a name made of filler words: to-do
         if usable(p):
             products.update({p, whole} if usable(whole) else {p})
@@ -683,9 +692,13 @@ def sunset_landing(url, final, name=None):
             # A full date at the front of the slug (2025-01-15-widget-sunset) is
             # when the notice came out, like a /2025/01/ folder, so only a year
             # earlier than the item's rules a match out.
-            dated = re.match(r"(\d{4})[-_]\d{2}[-_]", seg)
+            dated = re.match(r"(\d{4})[-_](?:0[1-9]|1[0-2])[-_]", seg)
             body = seg[dated.end():] if dated else seg
             landed_years = [y for y in re.findall(r"(?<!\d)(\d{4})(?!\d)", body) if _is_year(y)]
+            # A school or fiscal year (2024-25) covers both years.
+            for a, b in re.findall(r"(?<!\d)(\d{4})[-_](\d{2})(?!\d)", body):
+                if _is_year(a) and int(b) == (int(a) + 1) % 100:
+                    landed_years.append(str(int(a) + 1))
             if dated and listed_year and _is_year(dated.group(1)) \
                     and int(dated.group(1)) <= int(listed_year.group(1)):
                 landed_years.append(dated.group(1))

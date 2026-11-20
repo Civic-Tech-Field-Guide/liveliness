@@ -2731,6 +2731,7 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://widget.org/en-emea/", "https://foundation.org/news/widget-sunset/"),
             ("https://widget.org/ca-en/", "https://foundation.org/news/widget-sunset/"),
             ("https://widget.org/fr-int/", "https://foundation.org/news/widget-sunset/"),
+            ("https://x.org/2025-widget", "https://x.org/news/2024-25-widget-sunset/"),
             ("https://x.org/2024-widget", "https://x.org/news/2025-01-15-widget-sunset/"),
             ("https://x.org/to-do/resources/", "https://x.org/news/to-do-sunset/"),
             ("https://x.org/widget/2024/news/", "https://x.org/news/widget-sunset/"),
@@ -2794,6 +2795,7 @@ def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
             ("https://bigorg.org/tools/", "https://bigorg.org/news/bigorg-sunset/"),
             ("https://bigorg.org/our-work/", "https://bigorg.org/news/bigorg-sunset/"),
             ("https://bigorg.org/apps/", "https://bigorg.org/news/bigorg-sunset/"),
+            ("https://bigorg.org/our-tools/", "https://bigorg.org/news/our-tools-sunset/"),
             ("https://bigorg.org/resources/", "https://bigorg.org/news/resources-sunset/"),
             ("https://x.org/2090-agenda", "https://x.org/news/agenda-sunset/"),
             ("https://x.org/to-do/", "https://x.org/news/x-sunset/"),
@@ -2967,6 +2969,7 @@ def test_a_notice_address_keeps_a_page_naming_query():
     assert core._notice_address("https://x.org/n/;jsessionid=abc?p=1") == "https://x.org/n/?p=1"
     assert core._notice_address("https://x.org/a;jsessionid=x/b/?p=1") == "https://x.org/a/b/?p=1"
     assert core._notice_address("https://u:pw@x.org/n?p=1") == "https://x.org/n?p=1"
+    assert core._notice_address("https://x.org/?P=101") == "https://x.org/"
     assert core._notice_address("https://x.org/n/?id=8f3a2c-token") == "https://x.org/n/"
     # With an & present the server reads ;sid= as part of lang's value, so the
     # whole pair goes.
@@ -2980,7 +2983,8 @@ def test_locales_follow_bcp47_codes():
                 "en-eu", "zh-chs", "zh-tw", "fr-ca", "en-sa", "en-mx", "lo-la", "es-la"):
         assert core._is_locale_segment(seg), seg
     for seg in ("ar-vr", "my-data", "it-help", "en-xx", "zz", "zh-abcd", "en-aa", "fr-zzzz",
-                "to-do", "my-id", "is-it", "my-ai", "pi-ai", "sr-ai", "ca-valencia"):
+                "to-do", "my-id", "is-it", "my-ai", "pi-ai", "sr-ai", "ca-valencia", "pt-2030",
+                "en-2024", "ar-15"):
         assert not core._is_locale_segment(seg), seg
 
 
