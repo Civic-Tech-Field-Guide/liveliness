@@ -295,8 +295,10 @@ _SHUTDOWN_WORD = re.compile(r"[-_]shut[-_]?down" + _AFTER + _EXT + r"$", re.I)
 # Section pages that hold many things, so a listing there is not the site's
 # own front page: /news/, /tools/, /projects/.
 _SECTIONS = {"news", "blog", "tools", "tool", "projects", "project", "programs",
-             "program", "services", "service", "pages", "page", "data", "internet",
-             "team", "people", "staff"}
+             "program", "programmes", "services", "service", "pages", "page", "data",
+             "internet", "team", "people", "staff", "work", "ourwork", "apps",
+             "features", "downloads", "download", "resources", "events",
+             "initiatives", "products", "solutions"}
 # Slugs too generic to name a product: a page about, or an id.
 _GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page", "pages",
                      "project", "projects", "tool", "tools", "app", "apps", "index",
@@ -315,21 +317,69 @@ def _compact(seg):
     return "".join(w for w in re.split(r"[^a-z0-9]+", seg) if w and w not in _FILLER)
 
 
-_SCRIPTS = {"hans", "hant", "latn", "cyrl", "arab", "deva", "jpan", "kore"}
-
-
-# Second parts that make a lone two-part slug a product name, not a locale:
-# /ar-vr/ is augmented and virtual reality, not Arabic in a region.
-_NOT_REGIONS = {"vr", "ar", "ai", "ml", "ux", "ui", "it", "hr", "pr"}
+# BCP 47 language tags (RFC 5646), the standard browsers, CMSs and sitemaps use
+# for a locale in an address: a language (ISO 639-1, _LANGUAGE_CODES), then
+# optionally a script, then optionally a region. The region and script tables
+# are the current, non-deprecated entries of the IANA Language Subtag Registry
+# (File-Date 2026-11-18), which is where BCP 47 takes them from: ISO 3166-1
+# regions plus the registry's own additions such as EU, UN M.49 areas such as
+# 419, and ISO 15924 scripts.
+_BCP47_REGIONS = frozenset("""
+aa ac ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj bl
+bm bn bo bq br bs bt bv bw by bz ca cc cd cf cg ch ci ck cl cm cn co cp cq cr cu cv
+cw cx cy cz de dg dj dk dm do dz ea ec ee eg eh er es et eu ez fi fj fk fm fo fr ga
+gb gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu ic id ie il
+im in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz la lb lc li lk lr
+ls lt lu lv ly ma mc md me mf mg mh mk ml mm mn mo mp mq mr ms mt mu mv mw mx my mz
+na nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk pl pm pn pr ps pt pw py qa
+re ro rs ru rw sa sb sc sd se sg sh si sj sk sl sm sn so sr ss st sv sx sy sz ta tc
+td tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug um un us uy uz va vc ve vg vi vn
+vu wf ws ye yt za zm zw zz
+""".split())
+_BCP47_AREAS = frozenset("""
+001 002 003 005 009 011 013 014 015 017 018 019 021 029 030 034 035 039 053 054 057
+061 142 143 145 150 151 154 155 202 419
+""".split())
+_BCP47_SCRIPTS = frozenset("""
+adlm afak aghb ahom arab aran armi armn avst bali bamu bass batk beng berf bhks blis
+bopo brah brai bugi buhd cakm cans cari cham cher chis chrs cirt copt cpmn cprt cyrl
+cyrs deva diak dogr dsrt dupl egyd egyh egyp elba elym ethi gara geok geor glag gong
+gonm goth gran grek gujr gukh guru hanb hang hani hano hans hant hatr hebr hira hluw
+hmng hmnp hntl hrkt hung inds ital jamo java jpan jurc kali kana kawi khar khmr khoj
+kitl kits knda kore kpel krai kthi lana laoo latf latg latn leke lepc limb lina linb
+lisu loma lyci lydi mahj maka mand mani marc maya medf mend merc mero mlym modi mong
+moon mroo mtei mult mymr nagm nand narb nbat newa nkdb nkgb nkoo nshu ogam olck onao
+orkh orya osge osma ougr palm pauc pcun pelm perm phag phli phlp phlv phnx piqd plrd
+prti psin ranj rjng rohg roro runr samr sara sarb saur seal sgnw shaw shrd shui sidd
+sidt sind sinh sogd sogo sora soyo sund sunu sylo syrc syre syrj syrn tagb takr tale
+talu taml tang tavt tayo telu teng tfng tglg thaa thai tibt tirh tnsa todr tols toto
+tutg ugar vaii visp vith wara wcho wole xpeo xsux yezi yiii zanb zinh zmth zsye zsym
+zxxx zyyy zzzz
+""".split())
+_BCP47 = re.compile(r"([a-z]{2})(?:[-_]([a-z]{4}))?(?:[-_]([a-z]{2}|\d{3}))?", re.I)
 
 
 def _is_locale_segment(seg):
-    """A bare language code, or one with a two-letter region or a script: en, pt-br, zh-hant."""
-    m = re.fullmatch(r"([a-z]{2})(?:[-_]([a-z]{2}|[a-z]{4}))?", (seg or "").lower())
-    if not m or m.group(1) not in _LANGUAGE_CODES:
+    """
+    True when a path segment is a BCP 47 locale built from real codes: en,
+    pt-br, zh-hant, es-419, sr-latn-rs. ar-vr is not one (vr is no region), so
+    it stays a product name; it-it and es-ar are (Italy, Argentina).
+    """
+    m = _BCP47.fullmatch(seg or "")
+    if not m or m.group(1).lower() not in _LANGUAGE_CODES:
         return False
-    tail = m.group(2)
-    return tail is None or len(tail) == 2 or tail in _SCRIPTS
+    script, region = (m.group(2) or "").lower(), (m.group(3) or "").lower()
+    if script and script not in _BCP47_SCRIPTS:
+        return False
+    return not region or region in _BCP47_REGIONS or region in _BCP47_AREAS
+
+
+# Advertising and email-campaign tags, which say how someone arrived and never
+# which page they reached: Google (utm_*, gclid, dclid, gbraid, wbraid, _gl),
+# Meta (fbclid), Microsoft (msclkid), Yandex (yclid), Instagram (igshid),
+# Mailchimp (mc_*), HubSpot (_hs*), Marketo (mkt_tok).
+_AD_TRACKING = re.compile(r"^(?:utm_\w+|gclid|dclid|gbraid|wbraid|_gl|_ga|fbclid|msclkid|"
+                          r"yclid|igshid|mc_\w+|_hs\w+|mkt_tok)$", re.I)
 
 
 def _notice_address(url):
@@ -340,10 +390,12 @@ def _notice_address(url):
     if not url:
         return url
     p = urlparse(url)
-    query = urlencode([(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
-                       if not re.match(r"^(?:utm_\w+|gclid|fbclid|msclkid|mc_cid|mc_eid|"
-                                       r"igshid|_ga)$", k, re.I)])
-    return p._replace(query=query, fragment="").geturl()
+    # The query's pairs are filtered as they stand, never decoded and encoded
+    # again (RFC 3986 section 6.2.2): a server may treat %20 and + or a bare
+    # key and key= differently, and the address has to keep reaching the page.
+    pairs = [pair for pair in p.query.split("&")
+             if pair and not _AD_TRACKING.match(unquote(pair.split("=", 1)[0]))]
+    return p._replace(query="&".join(pairs), fragment="").geturl()
 
 
 def sunset_landing(url, final, name=None):
@@ -382,8 +434,7 @@ def sunset_landing(url, final, name=None):
     # (/en/, /pt-br/, /zh-hant/): my-data and it-help are product names.
     named = [seg for seg in listed_segs
              if not _INDEX_FILE.match(seg)
-             and not ((len(listed_segs) > 1 or len(seg) > 2) and _is_locale_segment(seg)
-                      and not (len(listed_segs) == 1 and seg.lower()[3:] in _NOT_REGIONS))]
+             and not ((len(listed_segs) > 1 or len(seg) > 2) and _is_locale_segment(seg))]
 
     def usable(p):
         return len(p) >= 3 and not p.isdigit() and p not in _GENERIC_PRODUCTS
@@ -409,7 +460,7 @@ def sunset_landing(url, final, name=None):
         if p not in _GENERIC_PRODUCTS:
             break
     # A front page, alone, in one language, or its about page (/en/about/).
-    front_page = all(_is_language_root("/" + seg)
+    front_page = all(_is_locale_segment(seg)
                      or (_compact(seg) in _GENERIC_PRODUCTS and _compact(seg) not in _SECTIONS)
                      for seg in named)
     if not products and front_page:
@@ -455,6 +506,10 @@ def sunset_landing(url, final, name=None):
             # A dated item only matches a notice that names its own year: the
             # 2023 report is not the 2024 report, nor a "report" with no year.
             listed_year = re.match(r"(\d{4})[-_]", product_seg)
+            # A four-digit prefix is a year only in the range a listing can
+            # date from (2030-agenda and 1000-cities are names).
+            if listed_year and not 1990 <= int(listed_year.group(1)) <= datetime.now().year + 1:
+                listed_year = None
             # The notice's own segment, or a year folder right above it
             # (/news/2024/widget-sunset/); not a /2024/05/ date permalink.
             landed_years = re.findall(r"(?<!\d)(\d{4})(?!\d)", seg)
@@ -465,7 +520,7 @@ def sunset_landing(url, final, name=None):
             # A subject word before "shutdown" is the page's topic, unless it
             # is the listed product's own name and the page sits under a
             # section such as /news/ (/map sent to /news/map-shutdown/).
-            under_section = any(x and not _is_language_root("/" + x) for x in segs[:i])
+            under_section = any(x and not _is_locale_segment(x) for x in segs[:i])
             if _compact(rest) in _SHUTDOWN_SUBJECTS and _SHUTDOWN_WORD.search(seg) \
                     and not (_compact(rest) == path_product and under_section):
                 return False
@@ -480,9 +535,9 @@ def sunset_landing(url, final, name=None):
         # A downtime word anywhere in the path outside the product's name marks
         # an outage (/maintenance/widget-shutdown/). A section such as
         # /planned-giving/ blocks a real notice too, a miss accepted for it.
-        around = "/".join([x for x in segs[:i] if not _is_language_root("/" + x)]
+        around = "/".join([x for x in segs[:i] if not _is_locale_segment(x)]
                           + [seg.replace(m.group("rest"), "")]
-                          + [x for x in segs[i + 1:] if not _is_language_root("/" + x)])
+                          + [x for x in segs[i + 1:] if not _is_locale_segment(x)])
         # _DOWNTIME covers a funding lapse too (/lapse-in-appropriations/).
         if _DOWNTIME.search(around) or _GOV_SHUTDOWN.search(seg):
             continue
