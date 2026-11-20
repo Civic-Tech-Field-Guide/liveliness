@@ -263,7 +263,7 @@ def _removed_page(url, final):
 # The ending word has to open or close the segment (widget-sunset,
 # farewell_widget), never sit inside it, where it is a subject
 # (government-shutdown-tracker) or a caption (2024-sunset-photos).
-_SUNSET_WORDS = (r"(?:sunsets?|sunsetted|sunsetting|shut[-_]?downs?|discontinued|"
+_SUNSET_WORDS = (r"(?:sunsets?|sunsetted|sunsetting|shut[-_]?down|discontinued|"
                  r"discontinuation|end[-_]of[-_]life|farewell)")
 _EXT = r"(?:\.[a-z0-9]{1,5})?"
 # A notice slug may carry a date before the product or a year or notice word
@@ -273,7 +273,7 @@ _AFTER = r"(?:[-_](?:\d{4}(?:[-_]\d{2}){0,2}|notice|announcement|update|faq))*"
 _SUNSET_AT_END = re.compile(r"^" + _BEFORE + r"(?P<rest>.+?)[-_]" + _SUNSET_WORDS + _AFTER + _EXT + r"$", re.I)
 # At the start of a segment the bare word "sunset" is usually a place
 # (sunset-district, sunset-park), so only its inflected forms count there.
-_SUNSET_START_WORDS = (r"(?:sunsetted|sunsetting|shut[-_]?downs?|discontinued|"
+_SUNSET_START_WORDS = (r"(?:sunsetted|sunsetting|shut[-_]?down|discontinued|"
                        r"discontinuation|end[-_]of[-_]life|farewell)")
 _SUNSET_AT_START = re.compile(r"^" + _BEFORE + _SUNSET_START_WORDS + r"[-_](?P<rest>.+?)" + _AFTER + _EXT + r"$", re.I)
 # Words that make a shutdown a planned outage rather than an ending, anywhere
@@ -301,10 +301,11 @@ def sunset_landing(url, final, name=None):
     whose address reads as this product's shutdown notice, or None.
 
     The landed segment has to be the listed product's name with an ending word
-    at one end of it. The product's name is the listed path's last specific
-    segment, skipping a file name such as index.html, a language code such as
-    /en/, and a generic page such as /about/ or /app/. A listed front page
-    takes its name from its registered domain (widget.org) or from `name`. This stands in for trusted_move(), which it
+    at one end of it. The product's name is the listed path's last two
+    specific segments, skipping a file name such as index.html, a language code such as
+    /en/, and a generic page such as /about/ or /app/. A front page, alone or
+    in one language, takes it from its registered domain (widget.org) or from
+    `name`. A short section such as /ai/ names nothing. This stands in for trusted_move(), which it
     deliberately does not ask: an organization that retires a product often
     announces it from a renamed domain (foundation.mozilla.org to
     www.mozillafoundation.org).
@@ -343,12 +344,18 @@ def sunset_landing(url, final, name=None):
             products.add(p)
             if len(products) == 2:
                 break
-    if not named:
-        # A listed front page: the product is the site's own name, read from
-        # its registered domain (widget.org) or the listing's name.
+    front_page = all(_is_language_root("/" + seg) or seg.isdigit() for seg in named)
+    if not products and front_page:
+        # A listed front page, alone or in one language (/en/):
+        # the product is the site's own name, read from its registered domain
+        # (widget.org) or from the listing's name, with and without an acronym
+        # in parentheses ("European Digital DemocracY network (EDDY)").
         host = urlparse(url).hostname or ""
         label = (_registrable(host).split(".") or [""])[0]
-        for p in (_compact(label), _compact(name or "")):
+        title = name or ""
+        outside = re.sub(r"\([^)]*\)", " ", title)
+        inside = " ".join(re.findall(r"\(([^)]*)\)", title))
+        for p in (_compact(label), _compact(title), _compact(outside), _compact(inside)):
             if usable(p):
                 products.add(p)
     if not products:
@@ -3385,7 +3392,10 @@ def render_page_text(url):
 # it would have been had no model existed, which is also what it keeps if the
 # pass is never run. Nothing in the public breakdown mentions a pending
 # reading, deliberately: a line saying a verdict is coming would sit on the
-# profile page forever if the pass never came.
+# profile page forever if the pass never came. A listing that redirects to its
+# own shutdown notice (sunset_landing) is held at Unknown, and its breakdown
+# says why in terms of the notice, which stays true whether or not a reading
+# ever comes.
 
 ADJUDICATE          = os.environ.get("ADJUDICATE", "1") != "0"
 ADJUDICATE_PAGE_CAP = 6000
@@ -4128,12 +4138,10 @@ def score_project(project, budget_s=None):
 
     if notice:
         held = ("" if page_closed or is_finished_work(project)
-                else ", leaves Status for a person")
+                else " and sets no Status")
         why.append("The listed address now redirects to %s, which reads as a shutdown "
-                   "notice, so the scorer counts nothing dated on that page%s, and %s" % (
-                       _PAGE_FINAL.get(website_url) or notice, held,
-                       "queues the page for a reading" if pending_adjudication
-                       else "could not queue the page for a reading"))
+                   "notice, so the scorer counts nothing dated on that page%s" % (
+                       _PAGE_FINAL.get(website_url) or notice, held))
 
     # The page saying it has finished outranks everything above it, including a
     # recent launch: something added to the directory in March and closed in July
@@ -4296,9 +4304,8 @@ def score_project(project, budget_s=None):
         why = ["Nothing on this listing could be checked: no working website address, "
                "no code repository, no feed and no reachable social accounts."]
     elif notice and not page_closed:
-        why.append("Reported as Unknown until a person reads the notice."
-                   if pending_adjudication else
-                   "Reported as Unknown: the notice could not be queued for a reading.")
+        why.append("Reported as Unknown, since feeds and accounts listed for a retired "
+                   "product are often its organization's and say nothing about the product.")
     elif undated:
         why.append("Nothing dated was found in code, feeds or social posts, so there is "
                    "no evidence either way about whether this project is still running. "

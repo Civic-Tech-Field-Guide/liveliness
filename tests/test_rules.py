@@ -2671,7 +2671,6 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://x.org/foo", "https://x.org/news/foo-shutdown"),
             ("https://x.org/foo", "https://x.org/blog/sunsetting_foo.html"),
             ("https://x.org/foo", "https://x.org/foo_end_of_life/"),
-            ("https://x.org/foo", "https://x.org/foo-shutdowns/"),
             ("https://x.org/foo", "https://x.org/farewell-to-foo/"),
             ("https://x.org/foo", "https://x.org/foo-shutdown.php"),
             ("https://x.org/widget/index.html", "https://x.org/news/widget-sunset/"),
@@ -2689,7 +2688,8 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://x.org/sunset-park-tenants", "https://x.org/news/sunset-park-tenants-shutdown/"),
             ("https://x.org/my-data/", "https://x.org/news/my-data-sunset/"),
             ("https://x.org/widget/overview", "https://x.org/news/widget-sunset/"),
-            ("https://x.org/widget", "https://x.org/blog/widget-sunset-2024-08-11/")):
+            ("https://x.org/widget", "https://x.org/blog/widget-sunset-2024-08-11/"),
+            ("https://widget.org/en/", "https://foundation.org/news/widget-sunset/")):
         assert core.sunset_landing(listed, final), (listed, final)
 
 
@@ -2717,6 +2717,7 @@ def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
             ("https://x.org/en", "https://x.org/en-sunset"),
             ("https://x.org/ai", "https://x.org/ai-sunset/"),
             ("https://x.org/district", "https://x.org/sunset-district/"),
+            ("https://x.org/keepiton/", "https://x.org/keepiton-shutdowns/"),
             ("https://bigorg.org/ai/", "https://bigorg.org/news/bigorg-farewell/")):
         assert not core.sunset_landing(listed, final), (listed, final)
 
@@ -2750,9 +2751,8 @@ def test_a_shutdown_notice_dates_nothing_and_goes_to_a_reading(monkeypatch):
     assert result["adjudication"] and "has moved" in result["adjudication"]["text"]
     assert result["status"] is None
     assert "widget-sunset" in result["breakdown"]
-    assert "queues the page for a reading" in result["breakdown"]
     assert "https://x.org/news/widget-sunset/" in result["breakdown"]
-    assert "until a person reads the notice" in result["breakdown"]
+    assert "reading" not in result["breakdown"]
     assert result["adjudication"]["notice_url"] == "https://x.org/news/widget-sunset/"
 
 
@@ -2770,7 +2770,7 @@ def test_a_notice_without_a_reading_says_so(monkeypatch):
     monkeypatch.setattr(core, "ADJUDICATE", False)
     result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
     assert result["adjudication"] is None
-    assert "could not queue the page for a reading" in result["breakdown"]
+    assert result["score"] is None
 
 
 def test_an_ordinary_redirect_is_still_dated(monkeypatch):
@@ -2791,6 +2791,8 @@ def test_an_ordinary_redirect_is_still_dated(monkeypatch):
 
 def test_a_listed_front_page_matches_on_the_listing_name():
     from liveliness import core
+    assert core.sunset_landing("https://eddy-site.eu/", "https://org.eu/news/eddy-sunset/",
+                               "European Digital DemocracY network (EDDY)")
     assert core.sunset_landing("https://getwidget.io/", "https://org.example/news/widget-sunset/", "Widget")
     assert not core.sunset_landing("https://getwidget.io/", "https://org.example/news/widget-sunset/")
 
