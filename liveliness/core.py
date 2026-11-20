@@ -272,7 +272,6 @@ _BEFORE = r"(?:\d{4}(?:[-_]\d{2}){0,2}[-_])?"
 _AFTER = r"(?:[-_](?:\d{4}|notice|announcement|update))*"
 _SUNSET_AT_END = re.compile(r"^" + _BEFORE + r"(?P<rest>.+?)[-_]" + _SUNSET_WORDS + _AFTER + _EXT + r"$", re.I)
 _SUNSET_AT_START = re.compile(r"^" + _BEFORE + _SUNSET_WORDS + r"[-_](?P<rest>.+?)" + _AFTER + _EXT + r"$", re.I)
-_SUNSET_ALONE = re.compile(r"(?:^|[-_])" + _SUNSET_WORDS + r"(?=[-_]|\.[a-z0-9]{1,5}$|$)", re.I)
 # Words that make a shutdown a planned outage rather than an ending, anywhere
 # in the landed path.
 _DOWNTIME = re.compile(r"(?:^|[-_/])(?:maintenance|planned|scheduled|outage|downtime|"
@@ -280,7 +279,6 @@ _DOWNTIME = re.compile(r"(?:^|[-_/])(?:maintenance|planned|scheduled|outage|down
 # Function words dropped before the product is compared: farewell-to-the-widget.
 _FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
 _INDEX_FILE = re.compile(r"^(?:index|default|home)(?:\.[a-z0-9]{1,5})?$", re.I)
-_LOCALE = re.compile(r"^[a-z]{2}(?:[-_][a-z]{2})?$", re.I)
 _DATE_PREFIX = re.compile(r"^" + _BEFORE)
 # Slugs too generic to name a product: a page about, or an id.
 _GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page", "pages",
@@ -324,7 +322,7 @@ def sunset_landing(url, final, name=None):
         return None   # the listing itself is the notice: nothing moved
     listed_segs = [seg for seg in listed_path.split("/") if seg]
     named = [seg for seg in listed_segs
-             if not _INDEX_FILE.match(seg) and not _LOCALE.match(seg)]
+             if not _INDEX_FILE.match(seg) and not _is_language_root("/" + seg)]
 
     def usable(p):
         return len(p) >= 3 and not p.isdigit() and p not in _GENERIC_PRODUCTS
@@ -4119,10 +4117,11 @@ def score_project(project, budget_s=None):
                        "their own")
 
     if notice:
+        held = ("" if page_closed or is_finished_work(project)
+                else ", leaves Status for a person")
         why.append("The listed address now redirects to %s, which reads as a shutdown "
-                   "notice, so the scorer counts nothing dated on that page, leaves "
-                   "Status for a person, and %s" % (
-                       notice, "queues the page for a reading" if pending_adjudication
+                   "notice, so the scorer counts nothing dated on that page%s, and %s" % (
+                       notice, held, "queues the page for a reading" if pending_adjudication
                        else "could not queue the page for a reading"))
 
     # The page saying it has finished outranks everything above it, including a
@@ -4227,6 +4226,14 @@ def score_project(project, budget_s=None):
     # was reported for, so a record with nothing dated stops being Unknown and
     # becomes a measurement. Only a listing with nothing checkable at all stays
     # Unknown, and that is what no_signals already means.
+    # The same goes for the score, activity status and last activity date:
+    # supplied feeds and social accounts are often the organization's, so a
+    # notice publishes Unknown until a person rules. The queue row keeps the
+    # number in raw_score.
+    if notice and not page_closed:
+        unknown = True
+        activity_status = "Unknown"
+
     if pending_adjudication is not None:
         closed_score = round(min(score, CLOSED_CAP), 1)
         pending_adjudication.update({
@@ -4256,13 +4263,6 @@ def score_project(project, budget_s=None):
                                       else score_to_status(closed_score),
         })
 
-    # The same goes for the score and activity status: supplied feeds and
-    # social accounts are often the organization's, so a notice publishes
-    # Unknown until a person rules. The queue row above keeps the raw score.
-    if notice and not page_closed:
-        unknown = True
-        activity_status = "Unknown"
-
     if unknown:
         score = None            # clears the field rather than publishing a number
 
@@ -4290,12 +4290,15 @@ def score_project(project, budget_s=None):
                    "A reachable website only shows the address still resolves. Reported "
                    "as Unknown rather than scored.")
     elif score is None:
-        why.append("Reported as Unknown until a person reads the notice.")
+        why.append("Reported as Unknown until a person reads the notice."
+                   if pending_adjudication else
+                   "Reported as Unknown: the notice could not be queued for a reading.")
     else:
         why.append(f"Total: {score:g} out of 100 - {activity_status}")
     breakdown = "\n".join(why)
 
-    last_activity_str = last_date.strftime("%Y-%m-%d") if last_date else None
+    last_activity_str = (last_date.strftime("%Y-%m-%d")
+                         if last_date and not (notice and not page_closed) else None)
     _log(f"    → score={'(cleared)' if score is None else score}  activity={activity_status}  "
           f"status={status or '(no change)'}  last_activity={last_activity_str}")
     if discovered_url:

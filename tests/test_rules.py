@@ -2712,7 +2712,8 @@ def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
             ("https://x.org/widget/about", "https://x.org/about-sunset/"),
             ("https://x.org/p/12345", "https://x.org/12345-sunset/"),
             ("https://x.org/en", "https://x.org/en-sunset"),
-            ("https://x.org/ai", "https://x.org/ai-sunset/")):
+            ("https://x.org/ai", "https://x.org/ai-sunset/"),
+            ("https://bigorg.org/ai/", "https://bigorg.org/news/bigorg-farewell/")):
         assert not core.sunset_landing(listed, final), (listed, final)
 
 
@@ -2794,6 +2795,7 @@ def test_a_notice_that_says_it_ended_keeps_inactive_and_is_queued(monkeypatch):
     monkeypatch.setattr(core, "page_says_closed", lambda *a, **k: (True, "this project has ended"))
     result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
     assert result["adjudication"] and result["adjudication"]["notice_url"]
+    assert result["status"] == "Inactive" and result["score"] is not None
 
 
 def test_a_notice_publishes_no_score_until_a_person_rules(monkeypatch):
@@ -2803,3 +2805,6 @@ def test_a_notice_publishes_no_score_until_a_person_rules(monkeypatch):
     result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
     assert result["score"] is None and result["activity_status"] == "Unknown"
     assert result["adjudication"]["raw_score"] > 0
+    assert result["adjudication"]["score"] is None
+    assert result["adjudication"]["activity_status"] == "Unknown"
+    assert result["last_activity_date"] is None
