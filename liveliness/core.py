@@ -292,9 +292,11 @@ _DATE_PREFIX = re.compile(r"^" + _BEFORE)
 _SHUTDOWN_SUBJECTS = {"internet", "mobile", "socialmedia", "network", "government",
                       "tracker", "map", "data"}
 _SHUTDOWN_WORD = re.compile(r"[-_]shut[-_]?down" + _AFTER + _EXT + r"$", re.I)
-# The pages that stand for a site's front page: /about/ and its kin, not a
-# section such as /news/ or /tools/.
-_FRONT_PAGES = {"about", "aboutus", "home", "index", "whoweare"}
+# The pages that stand for a site's front page: /about/, the app itself and
+# their kin, not a section such as /news/ or /tools/.
+_FRONT_PAGES = {"about", "aboutus", "home", "index", "whoweare", "app", "apps",
+                "dashboard", "login", "signin", "getstarted", "overview", "features",
+                "pricing"}
 # Slugs too generic to name a product: a page about, or an id.
 _GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page", "pages",
                      "project", "projects", "tool", "tools", "app", "apps", "index",
@@ -316,13 +318,25 @@ def _compact(seg):
 _SCRIPTS = {"hans", "hant", "latn", "cyrl", "arab", "deva", "jpan", "kore"}
 
 
-# Region and script locales common enough in site paths to read a lone one as
-# a language front page. A two-part slug outside this list (ar-vr, eu-ai) is a
-# product name.
-_COMMON_LOCALES = {"en-us", "en-gb", "en-ca", "en-au", "en-in", "pt-br", "pt-pt", "es-es",
-                   "es-mx", "es-ar", "fr-fr", "fr-ca", "fr-be", "de-de", "de-at", "de-ch",
-                   "it-it", "nl-nl", "nl-be", "zh-cn", "zh-tw", "zh-hk", "zh-hans", "zh-hant",
-                   "ja-jp", "ko-kr", "ru-ru", "pl-pl", "sv-se", "tr-tr"}
+# ISO 3166 region codes, so a two-part slug reads as a locale only when its
+# second part is a real region (en-ie, pt-br) or script (zh-hant). ar-vr and
+# eu-ai's second parts are not regions in this sense, so they stay names.
+_REGIONS = frozenset("""
+ad ae af ag al am ao ar at au az ba bb bd be bf bg bh bi bj bn bo br bs bt bw by bz
+ca cd cf cg ch ci cl cm cn co cr cu cv cy cz de dj dk dm do dz ec ee eg er es et fi
+fj fm fr ga gb gd ge gh gm gn gq gr gt gw gy hk hn hr ht hu id ie il in iq ir is it
+jm jo jp ke kg kh ki km kn kp kr kw kz la lb lc li lk lr ls lt lu lv ly ma mc md me
+mg mh mk ml mm mn mo mr mt mu mv mw mx my mz na ne ng ni nl no np nr nz om pa pe pg
+ph pk pl pr ps pt pw py qa ro rs ru rw sa sb sc sd se sg si sk sl sm sn so sr ss st
+sv sy sz td tg th tj tl tm tn to tr tt tv tw tz ua ug uk us uy uz va vc ve vn vu ws
+ye za zm zw
+""".split())
+
+
+def _has_region(seg):
+    """True for a locale with a real region or script part: en-ie, pt-br, zh-hant."""
+    m = re.fullmatch(r"[a-z]{2}[-_]([a-z]{2}|[a-z]{4})", (seg or "").lower())
+    return bool(m) and (m.group(1) in _REGIONS or m.group(1) in _SCRIPTS)
 
 
 def _is_locale_segment(seg):
@@ -379,8 +393,7 @@ def sunset_landing(url, final, name=None):
     named = [seg for seg in listed_segs
              if not _INDEX_FILE.match(seg)
              and not (_is_locale_segment(seg)
-                      and (len(seg) == 2 and len(listed_segs) > 1
-                           or seg.lower().replace("_", "-") in _COMMON_LOCALES))]
+                      and (len(listed_segs) > 1 if len(seg) == 2 else _has_region(seg)))]
 
     def usable(p):
         return len(p) >= 3 and not p.isdigit() and p not in _GENERIC_PRODUCTS
@@ -448,12 +461,10 @@ def sunset_landing(url, final, name=None):
         # discontinued): the rest is compared with the other one trimmed too.
         def rest_names_product(m):
             rest = m.group("rest")
-            # A dated item only matches a notice for its own year: the 2023
-            # report is not the 2024 report. A notice with no year still counts.
             # A dated item only matches a notice that names its own year: the
             # 2023 report is not the 2024 report, nor a "report" with no year.
             listed_year = re.match(r"(\d{4})[-_]", product_seg)
-            landed_years = re.findall(r"(?<!\d)(\d{4})(?!\d)", seg)
+            landed_years = re.findall(r"(?<!\d)(\d{4})(?!\d)", landed)
             if listed_year and listed_year.group(1) not in landed_years:
                 return False
             # A subject word before "shutdown" is the page's topic, unless it
@@ -477,8 +488,7 @@ def sunset_landing(url, final, name=None):
         around = "/".join([x for x in segs[:i] if not _is_language_root("/" + x)]
                           + [seg.replace(m.group("rest"), "")]
                           + [x for x in segs[i + 1:] if not _is_language_root("/" + x)])
-        # A funding lapse names itself anywhere in the path
-        # (/lapse-in-appropriations/widget-shutdown/).
+        # _DOWNTIME covers a funding lapse too (/lapse-in-appropriations/).
         if _DOWNTIME.search(around) or _GOV_SHUTDOWN.search(seg):
             continue
         # A match under a people section is a person leaving, not a product.
