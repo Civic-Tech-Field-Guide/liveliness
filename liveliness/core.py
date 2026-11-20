@@ -251,26 +251,29 @@ def _removed_page(url, final):
 
 # A path segment that announces the end of the thing it replaced: the
 # shutdown notice an organization points a retired product's old address at.
-# Whole words inside a hyphenated or underscored segment, so
-# /privacy-not-included-sunset/ and /shutdown.php count and /sunsetboulevard,
-# /closed-captioning or /retired-teachers do not.
-_SUNSET_WORDS = r"(?:sunset|sunsets|sunsetted|sunsetting|shutdown|shut-down|discontinued|end-of-life|farewell)"
-_SUNSET_WORD = re.compile(r"(?:^|[-_])" + _SUNSET_WORDS + r"(?=[-_]|\.[a-z0-9]{1,5}$|$)", re.I)
-# Path words too common to tie a notice to one product.
-_GENERIC_SLUG_WORDS = {"www", "index", "html", "htm", "php", "news", "blog", "page", "pages",
-                       "the", "and", "for", "our", "project", "projects", "tool", "tools"}
+# The ending word has to open or close the segment (widget-sunset,
+# farewell_widget), never sit inside it, where it is a subject
+# (government-shutdown-tracker) or a caption (2024-sunset-photos).
+_SUNSET_WORDS = (r"(?:sunsets?|sunsetted|sunsetting|shut[-_]?downs?|discontinued|"
+                 r"discontinuation|end[-_]of[-_]life|farewell)")
+_EXT = r"(?:\.[a-z0-9]{1,5})?"
+_SUNSET_AT_END = re.compile(r"^(?P<rest>.+?)[-_]" + _SUNSET_WORDS + _EXT + r"$", re.I)
+_SUNSET_AT_START = re.compile(r"^" + _SUNSET_WORDS + r"[-_](?P<rest>.+?)" + _EXT + r"$", re.I)
+_SUNSET_ALONE = re.compile(r"(?:^|[-_])" + _SUNSET_WORDS + r"(?=[-_]|\.[a-z0-9]{1,5}$|$)", re.I)
+# Words that make a shutdown a planned outage rather than an ending.
+_DOWNTIME = re.compile(r"(?:^|[-_])(?:maintenance|planned|scheduled|outage|downtime|"
+                       r"weekend|tonight|temporary)(?=[-_]|$)", re.I)
+# Function words dropped before the product is compared: farewell-to-the-widget.
+_FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
 
 
-def _slug_tokens(path):
-    """The distinctive words of a path, plus each segment with its separators removed."""
-    out = set()
-    for seg in path.lower().split("/"):
-        seg = re.sub(r"\.[a-z0-9]{1,5}$", "", seg)
-        words = [w for w in re.split(r"[^a-z0-9]+", seg) if len(w) >= 3]
-        out.update(w for w in words if w not in _GENERIC_SLUG_WORDS)
-        if len("".join(words)) >= 4:
-            out.add("".join(words))
-    return out
+def _compact(words):
+    return "".join(w for w in words if w not in _FILLER)
+
+
+def _words(seg):
+    seg = re.sub(r"\.[a-z0-9]{1,5}$", "", seg.lower())
+    return [w for w in re.split(r"[^a-z0-9]+", seg) if w]
 
 
 def sunset_landing(url, final):
@@ -284,36 +287,33 @@ def sunset_landing(url, final):
     news page and social accounts, which score as a lively project. Its
     address is often the only part that says what it is.
 
-    Two things have to hold. The landed segment carries a shutdown word as a
-    whole word, and the rest of that segment names the listed product: a word
-    of the listed path, or the listed segment run together. The second test is
-    what tells /tool/ sent to /news/tool-sunset/ from a campaign sent to
-    /internet-shutdown/, where the word is the subject and not an ending. It
-    also stands in for trusted_move(), which this deliberately does not ask:
-    an organization that retires a product often announces it from a renamed
-    domain (foundation.mozilla.org to www.mozillafoundation.org), and a
-    registrar's or acquirer's farewell page will not repeat the product's name.
+    The landed segment has to be the product's name with an ending word at one
+    end of it, and nothing else: the listed path's last segment, run together,
+    against the rest of the landed segment run together. That tells /widget/
+    sent to /news/widget-sunset/ from a campaign about shutdowns, a planned
+    outage or a farewell to some other team. It also stands in for
+    trusted_move(), which this deliberately does not ask: an organization that
+    retires a product often announces it from a renamed domain
+    (foundation.mozilla.org to www.mozillafoundation.org).
 
-    Only the redirect a plain fetch followed is seen. A page read through the
-    browser past a bot wall, or a notice reached by a meta refresh or a script,
-    leaves no landing address here and is not caught.
+    The scorer sees only the path of the redirect a plain fetch followed. It
+    misses a notice that a browser render, a meta refresh or a script reaches,
+    and one named only in a query string or fragment.
     """
     if not final or final == url or is_archive_host(final):
         return None
-    listed = (urlparse(url).path or "").lower()
-    landed = urlparse(final).path or ""
-    if landed.rstrip("/").lower() == listed.rstrip("/"):
+    listed_segs = [seg for seg in (urlparse(url).path or "").split("/") if seg]
+    if not listed_segs or any(_SUNSET_ALONE.search(seg) for seg in listed_segs):
+        return None   # a front page names no product; a notice moved nowhere
+    product = _compact(_words(listed_segs[-1]))
+    if len(product) < 3:
         return None
-    if any(_SUNSET_WORD.search(seg) for seg in listed.split("/") if seg):
-        return None   # the listing itself is the notice: nothing changed
-    listed_tokens = _slug_tokens(listed)
-    if not listed_tokens:
-        return None   # a front page names no product to match
+    landed = urlparse(final).path or ""
     for seg in landed.split("/"):
-        if not seg or not _SUNSET_WORD.search(seg):
+        if not seg or _DOWNTIME.search(seg):
             continue
-        rest = re.sub(r"(?:^|[-_])" + _SUNSET_WORDS + r"(?=[-_]|\.[a-z0-9]{1,5}$|$)", "", seg, flags=re.I)
-        if _slug_tokens(rest) & listed_tokens:
+        m = _SUNSET_AT_END.match(seg) or _SUNSET_AT_START.match(seg)
+        if m and _compact(_words(m.group("rest"))) == product:
             return landed
     return None
 
@@ -4130,7 +4130,10 @@ def score_project(project, budget_s=None):
     # much is happening there, and Activity status keeps carrying it; the score
     # exists precisely so that case does not have to collapse into a binary.
     if status == "Inactive":
-        says_finished = page_closed
+        # A redirect to a notice is read from the address alone, so it caps the
+        # score and leaves Status for a person. Only the page's own words are
+        # strong enough to write Inactive, which takes a record off the queue.
+        says_finished = page_closed and page_closed_source == "page"
         # A relink is the one failure that is explicitly not a verdict: the
         # organisation is still answering and only the link is stale, which is
         # a curator's call to make and not one to write permanently.

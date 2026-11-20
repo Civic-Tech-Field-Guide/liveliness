@@ -2668,7 +2668,8 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_a_closure():
     assert core.sunset_landing(url, notice) == "/en/nothing-personal/privacy-not-included-sunset/"
     for final in ("https://x.org/news/foo-shutdown", "https://x.org/blog/sunsetting_foo.html",
                   "https://x.org/foo-end-of-life/", "https://x.org/farewell-foo",
-                  "https://x.org/foo-shutdown.php"):
+                  "https://x.org/foo-shutdown.php", "https://x.org/foo_end_of_life/",
+                  "https://x.org/foo-shutdowns/", "https://x.org/farewell-to-foo/"):
         assert core.sunset_landing("https://x.org/foo", final), final
 
 
@@ -2680,8 +2681,16 @@ def test_a_shutdown_word_that_is_the_subject_or_names_another_thing_is_not_a_clo
                   "https://web.archive.org/web/2020/https://x.org/foo-sunset", url, None,
                   "https://x.org/campaigns/internet-shutdown/",
                   "https://registrar.example/domain-farewell/",
-                  "https://x.org/neighborhoods/sunset/"):
+                  "https://x.org/neighborhoods/sunset/",
+                  "https://x.org/news/foo-shutdown-maintenance-weekend/",
+                  "https://x.org/planned-foo-shutdown/"):
         assert not core.sunset_landing(url, final), final
+    # A shutdown word inside the segment is its subject, not an ending.
+    assert not core.sunset_landing("https://x.org/tracker", "https://x.org/government-shutdown-tracker/")
+    assert not core.sunset_landing("https://x.org/2024/report", "https://x.org/blog/2024-sunset-photos/")
+    # A word of the listing's section is not the product.
+    assert not core.sunset_landing("https://x.org/programs/widget",
+                                   "https://x.org/blog/farewell-to-our-programs-team/")
     # A campaign about shutdowns keeps its name in the address it moved to.
     assert not core.sunset_landing("https://x.org/keepiton", "https://x.org/campaigns/internet-shutdown/")
     # A listing that already points at the notice moved nowhere.
@@ -2706,4 +2715,6 @@ def test_score_project_caps_a_listing_that_redirects_to_its_shutdown_notice(monk
     assert result["score"] <= core.CLOSED_CAP
     assert core.REDIRECT_CLOSURE_WORDING in result["breakdown"]
     assert core.CLOSURE_SOURCE_WORDING not in result["breakdown"]
+    # An address alone caps the score but never writes Inactive.
+    assert result["status"] != "Inactive"
     assert "widget-sunset" in result["breakdown"]
