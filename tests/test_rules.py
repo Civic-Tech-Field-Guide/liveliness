@@ -2717,6 +2717,10 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://widget.org/en-uk/", "https://foundation.org/news/widget-sunset/"),
             ("https://widget.org/zh-cn/", "https://foundation.org/news/widget-sunset/"),
             ("https://widget.org/es-la/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/en-sa/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/lo-la/", "https://foundation.org/news/widget-sunset/"),
+            ("https://x.org/widget/resources/", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/news/widget/news/", "https://x.org/blog/widget-sunset/"),
             ("https://x.org/widget/download", "https://x.org/news/widget-sunset/"),
             ("https://x.org/widget/blog/", "https://x.org/news/widget-sunset/"),
             ("https://x.org/projects/2024-widget", "https://x.org/news/widget-sunset/"),
@@ -2942,6 +2946,7 @@ def test_a_notice_address_keeps_a_page_naming_query():
     assert core._notice_address("https://x.org/?page_id=7&lang=pt%2Dbr") == "https://x.org/?page_id=7&lang=pt%2Dbr"
     assert core._notice_address("https://x.org/?q=node/12") == "https://x.org/?q=node/12"
     assert core._notice_address("https://x.org/?q=node/12/secret") == "https://x.org/"
+    assert core._notice_address("https://x.org/?p=1;lang=en") == "https://x.org/?p=1;lang=en"
     assert core._notice_address("https://x.org/n/?id=8f3a2c-token") == "https://x.org/n/"
     assert core._notice_address("https://x.org/n/?lang=en;sid=abc123&id=99887766") == "https://x.org/n/?lang=en"
 
@@ -2949,7 +2954,7 @@ def test_a_notice_address_keeps_a_page_naming_query():
 def test_locales_follow_bcp47_codes():
     from liveliness import core
     for seg in ("en", "pt-br", "it-it", "es-419", "zh-hant", "sr-latn-rs", "en_GB", "en-uk",
-                "en-eu", "zh-chs", "zh-tw", "fr-ca"):
+                "en-eu", "zh-chs", "zh-tw", "fr-ca", "en-sa", "en-mx", "lo-la", "es-la"):
         assert core._is_locale_segment(seg), seg
     for seg in ("ar-vr", "my-data", "it-help", "en-xx", "zz", "zh-abcd", "en-aa", "fr-zzzz",
                 "to-do", "my-id", "is-it", "my-ai"):

@@ -1,6 +1,7 @@
 """
-Print the _CLDR_LOCALES table that liveliness/core.py carries, from the
-Unicode CLDR's published data.
+Print the _CLDR_LOCALES and _ISO_REGIONS tables that liveliness/core.py
+carries, from the Unicode CLDR's published data and the IANA Language Subtag
+Registry.
 
     python scripts/cldr_locales.py 49.0.0 > /tmp/locales.txt
 
@@ -15,6 +16,7 @@ import textwrap
 import urllib.request
 
 BASE = "https://cdn.jsdelivr.net/npm/cldr-core@%s/"
+REGISTRY = "https://www.iana.org/assignments/language-subtag-registry/language-subtag-registry"
 
 
 def fetch(version, path):
@@ -48,6 +50,19 @@ def main(version):
             pairs.add(p + "-" + region_of[parts[0]])
     print('_CLDR_LOCALES = frozenset("""\n%s\n""".split())'
           % "\n".join(textwrap.wrap(" ".join(sorted(pairs)), 84, break_on_hyphens=False, break_long_words=False)))
+    # ISO 3166-1 regions as BCP 47 takes them, private use (AA, ZZ, ranges) out.
+    text = urllib.request.urlopen(REGISTRY, timeout=30).read().decode("utf-8")
+    regions = set()
+    for block in text.split("\n%%\n"):
+        f = dict(line.split(": ", 1) for line in block.split("\n")
+                 if ": " in line and not line.startswith(" "))
+        tag = f.get("Subtag", "")
+        if (f.get("Type") == "region" and tag.isalpha() and "Deprecated" not in f
+                and f.get("Description") != "Private use"):
+            regions.add(tag.lower())
+    print("# " + text.split("\n", 1)[0])
+    print('_ISO_REGIONS = frozenset("""\n%s\n""".split())'
+          % "\n".join(textwrap.wrap(" ".join(sorted(regions)), 84)))
 
 
 if __name__ == "__main__":

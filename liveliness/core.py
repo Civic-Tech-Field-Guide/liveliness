@@ -448,6 +448,30 @@ zh-hant-id zh-hant-mo zh-hant-my zh-hant-pa zh-hant-pf zh-hant-ph zh-hant-sr
 zh-hant-th zh-hant-tw zh-hant-us zh-hant-vn zh-hk zh-id zh-mo zh-my zh-pa zh-pf
 zh-ph zh-sg zh-sr zh-th zh-tw zh-us zh-vn zu-latn zu-latn-za zu-za
 """.split())
+# ISO 3166-1 regions as the IANA Language Subtag Registry lists them for
+# BCP 47 (File-Date 2026-11-18), private-use codes left out.
+_ISO_REGIONS = frozenset("""
+ac ad ae af ag ai al am ao aq ar as at au aw ax az ba bb bd be bf bg bh bi bj bl bm
+bn bo bq br bs bt bv bw by bz ca cc cd cf cg ch ci ck cl cm cn co cp cq cr cu cv cw
+cx cy cz de dg dj dk dm do dz ea ec ee eg eh er es et eu ez fi fj fk fm fo fr ga gb
+gd ge gf gg gh gi gl gm gn gp gq gr gs gt gu gw gy hk hm hn hr ht hu ic id ie il im
+in io iq ir is it je jm jo jp ke kg kh ki km kn kp kr kw ky kz la lb lc li lk lr ls
+lt lu lv ly ma mc md me mf mg mh mk ml mm mn mo mp mq mr ms mt mu mv mw mx my mz na
+nc ne nf ng ni nl no np nr nu nz om pa pe pf pg ph pk pl pm pn pr ps pt pw py qa re
+ro rs ru rw sa sb sc sd se sg sh si sj sk sl sm sn so sr ss st sv sx sy sz ta tc td
+tf tg th tj tk tl tm tn to tr tt tv tw tz ua ug um un us uy uz va vc ve vg vi vn vu
+wf ws ye yt za zm zw
+""".split())
+# Languages CLDR lists in five or more regions (English, Arabic, Spanish,
+# French and the like). Sites pair these with any country (en-sa, es-us), so
+# such a pair counts even where CLDR has no entry for it. A language CLDR
+# ties to one country (Tongan, Burmese) does not get that, so to-do and my-id
+# stay names.
+_INTERNATIONAL = frozenset(
+    lang for lang, n in Counter(
+        t.split("-")[0] for t in _CLDR_LOCALES
+        if len(t.split("-")) == 2 and len(t.split("-")[1]) == 2).items()
+    if n >= 5)
 # Codes sites use that CLDR spells differently: the region codes ISO 3166
 # reserves for the United Kingdom and the European Union, la for Latin
 # America (CLDR 419), ww and int for worldwide (CLDR 001), and the old
@@ -467,6 +491,10 @@ def _is_locale_segment(seg):
         return False
     if len(parts) == 1:
         return parts[0] in _LANGUAGE_CODES
+    if "-".join(parts) in _CLDR_LOCALES:
+        return True          # lo-la is Lao in Laos before la is Latin America
+    if len(parts) == 2 and parts[0] in _INTERNATIONAL and parts[1] in _ISO_REGIONS:
+        return True
     parts = [parts[0]] + [_LOCALE_ALIASES.get(x, x) for x in parts[1:]]
     return "-".join(parts) in _CLDR_LOCALES
 
@@ -504,8 +532,9 @@ def _notice_address(url):
         return value.isdigit()
     # Both separators RFC 3986 sites use between pairs, so a ;sid= rides along
     # with nothing.
+    separator = ";" if ";" in p.query and "&" not in p.query else "&"
     pairs = [pair for pair in re.split(r"[&;]", p.query) if pair and keep(pair)]
-    return p._replace(query="&".join(pairs), fragment="").geturl()
+    return p._replace(query=separator.join(pairs), fragment="").geturl()
 
 
 def sunset_landing(url, final, name=None):
@@ -555,11 +584,13 @@ def sunset_landing(url, final, name=None):
     product_seg = ""
     path_product = ""
     version = ""
-    for seg in reversed(named):
-        if _compact(seg) in _SECTIONS and not any(
-                usable(_compact(x)) and _compact(x) not in _SECTIONS
-                for x in named[:named.index(seg)]):
-            break      # a listed section page (/resources/) names no product
+    for idx in range(len(named) - 1, -1, -1):
+        seg = named[idx]
+        if _compact(seg) in _SECTIONS:
+            if any(usable(_compact(x)) and _compact(x) not in _SECTIONS
+                   for x in named[:idx]):
+                continue   # /widget/resources/ names the widget above it
+            break          # a listed section page (/resources/) names no product
         if re.fullmatch(r"v\d+(?:\.\d+)*", seg, re.I):
             version = _compact(seg)
             continue   # a version (/widget/v1) names the product above it
