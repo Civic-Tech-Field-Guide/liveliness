@@ -2689,7 +2689,9 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://x.org/my-data/", "https://x.org/news/my-data-sunset/"),
             ("https://x.org/widget/overview", "https://x.org/news/widget-sunset/"),
             ("https://x.org/widget", "https://x.org/blog/widget-sunset-2024-08-11/"),
-            ("https://widget.org/en/", "https://foundation.org/news/widget-sunset/")):
+            ("https://widget.org/en/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.bigorg.org/", "https://bigorg.org/news/widget-sunset/"),
+            ("https://x.org/widget", "https://x.org/news/widget%2Dsunset/")):
         assert core.sunset_landing(listed, final), (listed, final)
 
 
@@ -2747,7 +2749,7 @@ def test_a_shutdown_notice_dates_nothing_and_goes_to_a_reading(monkeypatch):
     from liveliness import core
     seen = _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
     result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
-    assert seen == [None]          # no feed discovered from the notice
+    assert seen == []              # no feed read for a notice
     assert result["adjudication"] and "has moved" in result["adjudication"]["text"]
     assert result["status"] is None
     assert "widget-sunset" in result["breakdown"]
@@ -2756,11 +2758,29 @@ def test_a_shutdown_notice_dates_nothing_and_goes_to_a_reading(monkeypatch):
     assert result["adjudication"]["notice_url"] == "https://x.org/news/widget-sunset/"
 
 
-def test_a_notices_supplied_feed_does_not_make_it_active(monkeypatch):
+def test_a_notices_supplied_feed_and_accounts_are_not_counted(monkeypatch):
     from liveliness import core
     _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
-    monkeypatch.setattr(core, "latest_blog_date", lambda *a: _now())
-    result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
+    def never(*a, **k):
+        raise AssertionError("an organization's feed or account does not date the product")
+    monkeypatch.setattr(core, "latest_blog_date", never)
+    monkeypatch.setattr(core, "check_social_recency", never)
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/",
+                                        feeds=["https://x.org/feed"],
+                                        links=[{"url": "https://bsky.app/profile/x.org", "type": "Bluesky"}]))
+    assert result["status"] is None and result["last_activity_date"] is None
+
+
+def test_a_notices_own_repository_still_counts(monkeypatch):
+    from liveliness import core
+    _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    monkeypatch.setattr(core, "latest_blog_date", lambda *a: None)
+    old = _now().replace(year=_now().year - 3)
+    monkeypatch.setattr(core, "check_github", lambda u: {"best_date": old, "archived": True,
+                                                         "dates": {"push": old}})
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/",
+                                        repo="https://github.com/x/widget"))
+    assert result["score"] is not None and result["last_activity_date"] is not None
     assert result["status"] is None
 
 
@@ -2771,6 +2791,7 @@ def test_a_notice_without_a_reading_says_so(monkeypatch):
     result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
     assert result["adjudication"] is None
     assert result["score"] is None
+    assert "https://x.org/news/widget-sunset/" in result["breakdown"]
 
 
 def test_an_ordinary_redirect_is_still_dated(monkeypatch):
@@ -2806,13 +2827,9 @@ def test_a_notice_that_says_it_ended_keeps_inactive_and_is_queued(monkeypatch):
     assert result["status"] == "Inactive" and result["score"] is not None
 
 
-def test_a_notice_publishes_no_score_until_a_person_rules(monkeypatch):
+def test_a_notice_with_nothing_else_dated_is_unknown(monkeypatch):
     from liveliness import core
     _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
-    monkeypatch.setattr(core, "latest_blog_date", lambda *a: _now())
     result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
     assert result["score"] is None and result["activity_status"] == "Unknown"
-    assert result["adjudication"]["raw_score"] > 0
-    assert result["adjudication"]["score"] is None
-    assert result["adjudication"]["activity_status"] == "Unknown"
     assert result["last_activity_date"] is None

@@ -344,14 +344,20 @@ def sunset_landing(url, final, name=None):
             products.add(p)
             if len(products) == 2:
                 break
-    front_page = all(_is_language_root("/" + seg) or seg.isdigit() for seg in named)
+    front_page = all(_is_language_root("/" + seg) for seg in named)
     if not products and front_page:
         # A listed front page, alone or in one language (/en/):
         # the product is the site's own name, read from its registered domain
         # (widget.org) or from the listing's name, with and without an acronym
         # in parentheses ("European Digital DemocracY network (EDDY)").
-        host = urlparse(url).hostname or ""
+        host = (urlparse(url).hostname or "").lower()
         label = (_registrable(host).split(".") or [""])[0]
+        # A subdomain names the product (widget.bigorg.org), the registered
+        # domain names the organization, so the subdomain wins when there is one.
+        sub = host[: -len(_registrable(host))].rstrip(".")
+        sub = sub[4:] if sub.startswith("www.") else ("" if sub == "www" else sub)
+        if sub:
+            label = sub.split(".")[-1]
         title = name or ""
         outside = re.sub(r"\([^)]*\)", " ", title)
         inside = " ".join(re.findall(r"\(([^)]*)\)", title))
@@ -360,7 +366,7 @@ def sunset_landing(url, final, name=None):
                 products.add(p)
     if not products:
         return None
-    segs = landed.split("/")
+    segs = [unquote(seg) for seg in landed.split("/")]
     for i, seg in enumerate(segs):
         if not seg:
             continue
@@ -372,7 +378,7 @@ def sunset_landing(url, final, name=None):
         # a section name, not an outage.
         around = "/".join([seg.replace(m.group("rest"), "")] + segs[i + 1:])
         if _DOWNTIME.search(around):
-            return None
+            continue
         return landed
     return None
 
@@ -3708,7 +3714,10 @@ def score_project(project, budget_s=None):
     time.sleep(0.3)  # respect GitHub rate limits
 
     # ── Blog feeds ───────────────────────────────────────────────────────────
-    blog_date = latest_blog_date(project.feeds, None if notice else website_url, url_class)
+    # On a notice the feeds are dropped too, supplied ones included: they are
+    # usually the organization's, still posting after the product ended. The
+    # product's own repository below still counts.
+    blog_date = None if notice else latest_blog_date(project.feeds, website_url, url_class)
     _log(f"    blog     → latest post: {blog_date}")
 
     # ── Social links: recency + accessibility ────────────────────────────────
@@ -3738,7 +3747,8 @@ def score_project(project, budget_s=None):
     accessible_count  = 0
     social_dated      = []  # list of (datetime, platform_label)
 
-    for url in all_social_urls:
+    # Social accounts go the same way on a notice, for the same reason.
+    for url in ([] if notice else all_social_urls):
         alive = check_url_alive(url)
         if alive is True:
             accessible_count += 1
@@ -4140,7 +4150,8 @@ def score_project(project, budget_s=None):
         held = ("" if page_closed or is_finished_work(project)
                 else " and sets no Status")
         why.append("The listed address now redirects to %s, which reads as a shutdown "
-                   "notice, so the scorer counts nothing dated on that page%s" % (
+                   "notice, so the scorer counts nothing dated on that page, and no "
+                   "feed or social account, since those are usually the organization's%s" % (
                        _PAGE_FINAL.get(website_url) or notice, held))
 
     # The page saying it has finished outranks everything above it, including a
@@ -4245,14 +4256,6 @@ def score_project(project, budget_s=None):
     # was reported for, so a record with nothing dated stops being Unknown and
     # becomes a measurement. Only a listing with nothing checkable at all stays
     # Unknown, and that is what no_signals already means.
-    # The same goes for the score, activity status and last activity date:
-    # supplied feeds and social accounts are often the organization's, so a
-    # notice publishes Unknown until a person rules. The queue row keeps the
-    # number in raw_score.
-    if notice and not page_closed:
-        unknown = True
-        activity_status = "Unknown"
-
     if pending_adjudication is not None:
         closed_score = round(min(score, CLOSED_CAP), 1)
         pending_adjudication.update({
@@ -4303,9 +4306,6 @@ def score_project(project, budget_s=None):
     elif no_signals:
         why = ["Nothing on this listing could be checked: no working website address, "
                "no code repository, no feed and no reachable social accounts."]
-    elif notice and not page_closed:
-        why.append("Reported as Unknown, since feeds and accounts listed for a retired "
-                   "product are often its organization's and say nothing about the product.")
     elif undated:
         why.append("Nothing dated was found in code, feeds or social posts, so there is "
                    "no evidence either way about whether this project is still running. "
@@ -4315,8 +4315,7 @@ def score_project(project, budget_s=None):
         why.append(f"Total: {score:g} out of 100 - {activity_status}")
     breakdown = "\n".join(why)
 
-    last_activity_str = (last_date.strftime("%Y-%m-%d")
-                         if last_date and not (notice and not page_closed) else None)
+    last_activity_str = last_date.strftime("%Y-%m-%d") if last_date else None
     _log(f"    → score={'(cleared)' if score is None else score}  activity={activity_status}  "
           f"status={status or '(no change)'}  last_activity={last_activity_str}")
     if discovered_url:
