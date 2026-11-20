@@ -2742,6 +2742,7 @@ def test_a_shutdown_notice_dates_nothing_and_goes_to_a_reading(monkeypatch):
     assert result["status"] is None
     assert "widget-sunset" in result["breakdown"]
     assert "queues the page for a reading" in result["breakdown"]
+    assert result["adjudication"]["notice_url"] == "https://x.org/news/widget-sunset/"
 
 
 def test_a_notices_supplied_feed_does_not_make_it_active(monkeypatch):

@@ -4217,6 +4217,10 @@ def score_project(project, budget_s=None):
             # Total are both answers to questions a closure re-opens, and a
             # rebuilt breakdown wants them written fresh rather than stripped.
             "reasons":                list(why),
+            # The full address the listing now redirects to, when it reads as
+            # the product's shutdown notice. The Field Guide's review step
+            # shows it, and sends the page to a person whatever the reading.
+            "notice_url":             _PAGE_FINAL.get(website_url) if notice else None,
             "closed_score":           None if no_signals else closed_score,
             "closed_activity_status": "Unknown" if no_signals
                                       else score_to_activity_status(closed_score),
