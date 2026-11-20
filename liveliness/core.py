@@ -360,7 +360,7 @@ def sunset_landing(url, final, name=None):
     # (/en/, /pt-br/, /zh-hant/): my-data and it-help are product names.
     named = [seg for seg in listed_segs
              if not _INDEX_FILE.match(seg)
-             and not (len(listed_segs) > 1 and _is_locale_segment(seg))]
+             and not ((len(listed_segs) > 1 or len(seg) > 2) and _is_locale_segment(seg))]
 
     def usable(p):
         return len(p) >= 3 and not p.isdigit() and p not in _GENERIC_PRODUCTS
@@ -404,7 +404,7 @@ def sunset_landing(url, final, name=None):
                 products.add(p)
     if not products:
         return None
-    segs = [unquote(seg) for seg in landed.split("/")]
+    segs = [unquote(seg).replace(" ", "-") for seg in landed.split("/")]
     for i, seg in enumerate(segs):
         if not seg:
             continue
@@ -3451,7 +3451,7 @@ def render_page_text(url):
 # profile page forever if the pass never came. For a listing that redirects
 # to its own shutdown notice (sunset_landing), the scorer dates nothing from
 # the notice, its feeds or its social accounts, and the rules set no Status
-# while the reading is queued. The breakdown names the notice, which stays
+# while the reading waits in the queue. The breakdown names the notice, which stays
 # true whether or not a reading ever comes.
 
 ADJUDICATE          = os.environ.get("ADJUDICATE", "1") != "0"
@@ -3765,7 +3765,7 @@ def score_project(project, budget_s=None):
     time.sleep(0.3)  # respect GitHub rate limits
 
     # ── Blog feeds ───────────────────────────────────────────────────────────
-    # On a notice the feeds are dropped too, supplied ones included: they are
+    # On a notice the scorer drops the feeds too, supplied ones included: they are
     # usually the organization's, still posting after the product ended. The
     # product's own repository below still counts.
     blog_date = None if notice else latest_blog_date(project.feeds, website_url, url_class)

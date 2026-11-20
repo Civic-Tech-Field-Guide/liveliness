@@ -2700,6 +2700,8 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://civic.widget.org/", "https://foundation.org/news/widget-sunset/"),
             ("https://x.org/my-data/app", "https://x.org/news/my-data-sunset/"),
             ("https://widget.org/en/about/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/pt-br/", "https://foundation.org/news/widget-sunset/"),
+            ("https://x.org/widget", "https://x.org/news/widget-shutdown%20notice"),
             ("https://widget.en.bigorg.org/", "https://bigorg.org/news/widget-sunset/"),
             ("https://x.org/tracker", "https://x.org/news/tracker-sunset/"),
             ("https://x.org/widget", "https://x.org/news/widget-sunset/en-us/"),
