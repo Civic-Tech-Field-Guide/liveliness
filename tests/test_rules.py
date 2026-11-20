@@ -2715,6 +2715,11 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://widget.org/es-419/", "https://foundation.org/news/widget-sunset/"),
             ("https://widget.org/sr-latn-rs/", "https://foundation.org/news/widget-sunset/"),
             ("https://widget.org/en-uk/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/zh-cn/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/es-la/", "https://foundation.org/news/widget-sunset/"),
+            ("https://x.org/widget/download", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/widget/blog/", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/projects/2024-widget", "https://x.org/news/widget-sunset/"),
             ("https://events.bigorg.org/", "https://bigorg.org/news/events-sunset/"),
             ("https://x.org/to-do/", "https://x.org/news/to-do-sunset/"),
             ("https://x.org/2090-agenda", "https://x.org/news/2090-agenda-sunset/"),
@@ -2936,7 +2941,9 @@ def test_a_notice_address_keeps_a_page_naming_query():
     assert core._notice_address("https://x.org/n/?sessionid=abc&email=j%40x.org&ref=tw") == "https://x.org/n/"
     assert core._notice_address("https://x.org/?page_id=7&lang=pt%2Dbr") == "https://x.org/?page_id=7&lang=pt%2Dbr"
     assert core._notice_address("https://x.org/?q=node/12") == "https://x.org/?q=node/12"
+    assert core._notice_address("https://x.org/?q=node/12/secret") == "https://x.org/"
     assert core._notice_address("https://x.org/n/?id=8f3a2c-token") == "https://x.org/n/"
+    assert core._notice_address("https://x.org/n/?lang=en;sid=abc123&id=99887766") == "https://x.org/n/?lang=en"
 
 
 def test_locales_follow_bcp47_codes():
@@ -2947,3 +2954,10 @@ def test_locales_follow_bcp47_codes():
     for seg in ("ar-vr", "my-data", "it-help", "en-xx", "zz", "zh-abcd", "en-aa", "fr-zzzz",
                 "to-do", "my-id", "is-it", "my-ai"):
         assert not core._is_locale_segment(seg), seg
+
+
+
+def test_the_locale_table_holds_whole_tags():
+    from liveliness import core
+    assert not any(t.endswith("-") for t in core._CLDR_LOCALES)
+    assert {"zh-cn", "uk-ua", "be-by"} <= core._CLDR_LOCALES

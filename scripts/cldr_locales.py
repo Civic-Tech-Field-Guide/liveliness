@@ -47,7 +47,7 @@ def main(version):
         if len(parts) == 2 and len(parts[1]) == 4 and parts[0] in region_of:
             pairs.add(p + "-" + region_of[parts[0]])
     print('_CLDR_LOCALES = frozenset("""\n%s\n""".split())'
-          % "\n".join(textwrap.wrap(" ".join(sorted(pairs)), 84)))
+          % "\n".join(textwrap.wrap(" ".join(sorted(pairs)), 84, break_on_hyphens=False, break_long_words=False)))
 
 
 if __name__ == "__main__":
