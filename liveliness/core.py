@@ -292,11 +292,11 @@ _DATE_PREFIX = re.compile(r"^" + _BEFORE)
 _SHUTDOWN_SUBJECTS = {"internet", "mobile", "socialmedia", "network", "government",
                       "tracker", "map", "data"}
 _SHUTDOWN_WORD = re.compile(r"[-_]shut[-_]?down" + _AFTER + _EXT + r"$", re.I)
-# The pages that stand for a site's front page: /about/, the app itself and
-# their kin, not a section such as /news/ or /tools/.
-_FRONT_PAGES = {"about", "aboutus", "home", "index", "whoweare", "app", "apps",
-                "dashboard", "login", "signin", "getstarted", "overview", "features",
-                "pricing"}
+# Section pages that hold many things, so a listing there is not the site's
+# own front page: /news/, /tools/, /projects/.
+_SECTIONS = {"news", "blog", "tools", "tool", "projects", "project", "programs",
+             "program", "services", "service", "pages", "page", "data", "internet",
+             "team", "people", "staff"}
 # Slugs too generic to name a product: a page about, or an id.
 _GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page", "pages",
                      "project", "projects", "tool", "tools", "app", "apps", "index",
@@ -318,25 +318,9 @@ def _compact(seg):
 _SCRIPTS = {"hans", "hant", "latn", "cyrl", "arab", "deva", "jpan", "kore"}
 
 
-# ISO 3166 region codes, so a two-part slug reads as a locale only when its
-# second part is a real region (en-ie, pt-br) or script (zh-hant). ar-vr and
-# eu-ai's second parts are not regions in this sense, so they stay names.
-_REGIONS = frozenset("""
-ad ae af ag al am ao ar at au az ba bb bd be bf bg bh bi bj bn bo br bs bt bw by bz
-ca cd cf cg ch ci cl cm cn co cr cu cv cy cz de dj dk dm do dz ec ee eg er es et fi
-fj fm fr ga gb gd ge gh gm gn gq gr gt gw gy hk hn hr ht hu id ie il in iq ir is it
-jm jo jp ke kg kh ki km kn kp kr kw kz la lb lc li lk lr ls lt lu lv ly ma mc md me
-mg mh mk ml mm mn mo mr mt mu mv mw mx my mz na ne ng ni nl no np nr nz om pa pe pg
-ph pk pl pr ps pt pw py qa ro rs ru rw sa sb sc sd se sg si sk sl sm sn so sr ss st
-sv sy sz td tg th tj tl tm tn to tr tt tv tw tz ua ug uk us uy uz va vc ve vn vu ws
-ye za zm zw
-""".split())
-
-
-def _has_region(seg):
-    """True for a locale with a real region or script part: en-ie, pt-br, zh-hant."""
-    m = re.fullmatch(r"[a-z]{2}[-_]([a-z]{2}|[a-z]{4})", (seg or "").lower())
-    return bool(m) and (m.group(1) in _REGIONS or m.group(1) in _SCRIPTS)
+# Second parts that make a lone two-part slug a product name, not a locale:
+# /ar-vr/ is augmented and virtual reality, not Arabic in a region.
+_NOT_REGIONS = {"vr", "ar", "ai", "ml", "ux", "ui", "it", "hr", "pr"}
 
 
 def _is_locale_segment(seg):
@@ -349,11 +333,17 @@ def _is_locale_segment(seg):
 
 
 def _notice_address(url):
-    """A notice's address without its query string or fragment, for publishing."""
+    """
+    A notice's address without tracking tags or fragment, for publishing. The
+    rest of the query stays: on some sites (?p=101) it is the page.
+    """
     if not url:
         return url
     p = urlparse(url)
-    return p._replace(query="", fragment="").geturl()
+    query = urlencode([(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
+                       if not re.match(r"^(?:utm_\w+|gclid|fbclid|msclkid|mc_cid|mc_eid|"
+                                       r"igshid|_ga)$", k, re.I)])
+    return p._replace(query=query, fragment="").geturl()
 
 
 def sunset_landing(url, final, name=None):
@@ -392,8 +382,8 @@ def sunset_landing(url, final, name=None):
     # (/en/, /pt-br/, /zh-hant/): my-data and it-help are product names.
     named = [seg for seg in listed_segs
              if not _INDEX_FILE.match(seg)
-             and not (_is_locale_segment(seg)
-                      and (len(listed_segs) > 1 if len(seg) == 2 else _has_region(seg)))]
+             and not ((len(listed_segs) > 1 or len(seg) > 2) and _is_locale_segment(seg)
+                      and not (len(listed_segs) == 1 and seg.lower()[3:] in _NOT_REGIONS))]
 
     def usable(p):
         return len(p) >= 3 and not p.isdigit() and p not in _GENERIC_PRODUCTS
@@ -419,7 +409,8 @@ def sunset_landing(url, final, name=None):
         if p not in _GENERIC_PRODUCTS:
             break
     # A front page, alone, in one language, or its about page (/en/about/).
-    front_page = all(_is_language_root("/" + seg) or _compact(seg) in _FRONT_PAGES
+    front_page = all(_is_language_root("/" + seg)
+                     or (_compact(seg) in _GENERIC_PRODUCTS and _compact(seg) not in _SECTIONS)
                      for seg in named)
     if not products and front_page:
         # A listed front page, alone or in one language (/en/):
@@ -464,7 +455,11 @@ def sunset_landing(url, final, name=None):
             # A dated item only matches a notice that names its own year: the
             # 2023 report is not the 2024 report, nor a "report" with no year.
             listed_year = re.match(r"(\d{4})[-_]", product_seg)
-            landed_years = re.findall(r"(?<!\d)(\d{4})(?!\d)", landed)
+            # The notice's own segment, or a year folder right above it
+            # (/news/2024/widget-sunset/); not a /2024/05/ date permalink.
+            landed_years = re.findall(r"(?<!\d)(\d{4})(?!\d)", seg)
+            if i > 0 and re.fullmatch(r"\d{4}", segs[i - 1]):
+                landed_years.append(segs[i - 1])
             if listed_year and listed_year.group(1) not in landed_years:
                 return False
             # A subject word before "shutdown" is the page's topic, unless it
@@ -4272,8 +4267,7 @@ def score_project(project, budget_s=None):
                    "notice, so the scorer counts nothing dated on that page%s" % (
                        _notice_address(_PAGE_FINAL.get(website_url)) or notice,
                        ", and no feed or social account, since those are usually the "
-                       "organization's" if (project.feeds or all_social_urls
-                                            or url_class == "homepage") else ""))
+                       "organization's" if (project.feeds or all_social_urls) else ""))
 
     # The page saying it has finished outranks everything above it, including a
     # recent launch: something added to the directory in March and closed in July

@@ -2709,6 +2709,8 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://widget.org/en-ie/about/", "https://foundation.org/news/widget-sunset/"),
             ("https://widget.org/en-nz/", "https://foundation.org/news/widget-sunset/"),
             ("https://widget.org/app/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/en-eu/", "https://foundation.org/news/widget-sunset/"),
+            ("https://widget.org/docs/", "https://foundation.org/news/widget-sunset/"),
             ("https://x.org/projects/2024-widget", "https://x.org/news/2024/widget-sunset/"),
             ("https://x.org/projects/2024-widget", "https://x.org/news/2024-widget-sunset/"),
             ("https://x.org/widget/v1", "https://x.org/news/widget-v1-sunset/"),
@@ -2762,6 +2764,7 @@ def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
             ("https://bigorg.org/news/", "https://bigorg.org/news/bigorg-sunset/"),
             ("https://bigorg.org/tools/", "https://bigorg.org/news/bigorg-sunset/"),
             ("https://x.org/2024-report", "https://x.org/news/report-sunset/"),
+            ("https://x.org/2024-report", "https://x.org/2024/05/report-sunset/"),
             ("https://x.org/2023-annual-report", "https://x.org/news/2024-annual-report-sunset/"),
             ("https://x.org/2023-annual-report/overview", "https://x.org/news/2024-annual-report-sunset/"),
             ("https://x.org/team/alice", "https://x.org/blog/alice-sunsetting/"),
@@ -2910,3 +2913,9 @@ def test_an_unqueued_notice_still_gets_no_status(monkeypatch):
                                         repo="https://github.com/x/widget"))
     assert result["adjudication"] is None and result["status"] is None
     assert result["notice_url"] == "https://x.org/news/widget-sunset/"
+
+
+
+def test_a_notice_address_keeps_a_page_naming_query():
+    from liveliness import core
+    assert core._notice_address("https://x.org/?p=101&utm_source=r#top") == "https://x.org/?p=101"
