@@ -2718,3 +2718,35 @@ def test_score_project_caps_a_listing_that_redirects_to_its_shutdown_notice(monk
     # An address alone caps the score but never writes Inactive.
     assert result["status"] != "Inactive"
     assert "widget-sunset" in result["breakdown"]
+
+
+def test_index_files_locales_and_trailing_years_still_match():
+    from liveliness import core
+    assert core.sunset_landing("https://x.org/widget/index.html", "https://x.org/news/widget-sunset/")
+    assert core.sunset_landing("https://x.org/widget/en/", "https://x.org/news/widget-sunset/")
+    assert core.sunset_landing("https://x.org/widget", "https://x.org/news/widget-sunset-2024/")
+    assert core.sunset_landing("https://x.org/widget", "https://x.org/widget-shutdown-notice")
+
+
+def test_the_notice_has_to_say_it_moved():
+    from liveliness import core
+    assert core.notice_says_it_moved("Privacy Not Included Has Moved. We are continuing that work at our magazine.")
+    assert core.notice_says_it_moved("Widget has been sunset as of June.")
+    assert not core.notice_says_it_moved("Track internet shutdowns around the world in real time.")
+    assert not core.notice_says_it_moved("Sunrise and sunset times for any city.")
+
+
+def test_a_shutdown_tracker_that_redirects_to_its_own_name_is_not_capped(monkeypatch):
+    from liveliness import core
+    _undated_live_site(monkeypatch, core)
+    page = "<title>Internet shutdown tracker</title>" + "<p>Track internet shutdowns around the world.</p>" * 20
+    def fetch(u):
+        core._PAGE_FINAL[u] = "https://x.org/internet-shutdown/"
+        return page, {}
+    monkeypatch.setattr(core, "get_page_cached", fetch)
+    monkeypatch.setattr(core, "latest_blog_date", lambda *a: _now())
+    monkeypatch.setattr(core, "sitemap_date", lambda u, now, **k: None)
+    monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: None)
+    result = core.score_project(Project(name="x", website="https://x.org/internet"))
+    assert result["score"] > core.CLOSED_CAP
+    assert core.REDIRECT_CLOSURE_WORDING not in result["breakdown"]

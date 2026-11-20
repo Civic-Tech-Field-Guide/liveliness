@@ -257,7 +257,10 @@ def _removed_page(url, final):
 _SUNSET_WORDS = (r"(?:sunsets?|sunsetted|sunsetting|shut[-_]?downs?|discontinued|"
                  r"discontinuation|end[-_]of[-_]life|farewell)")
 _EXT = r"(?:\.[a-z0-9]{1,5})?"
-_SUNSET_AT_END = re.compile(r"^(?P<rest>.+?)[-_]" + _SUNSET_WORDS + _EXT + r"$", re.I)
+# A notice slug may carry a year or a notice word after the ending word:
+# widget-sunset-2024, widget-shutdown-notice.
+_AFTER = r"(?:[-_](?:\d{4}|notice|announcement|update))?"
+_SUNSET_AT_END = re.compile(r"^(?P<rest>.+?)[-_]" + _SUNSET_WORDS + _AFTER + _EXT + r"$", re.I)
 _SUNSET_AT_START = re.compile(r"^" + _SUNSET_WORDS + r"[-_](?P<rest>.+?)" + _EXT + r"$", re.I)
 _SUNSET_ALONE = re.compile(r"(?:^|[-_])" + _SUNSET_WORDS + r"(?=[-_]|\.[a-z0-9]{1,5}$|$)", re.I)
 # Words that make a shutdown a planned outage rather than an ending.
@@ -274,6 +277,21 @@ def _compact(words):
 def _words(seg):
     seg = re.sub(r"\.[a-z0-9]{1,5}$", "", seg.lower())
     return [w for w in re.split(r"[^a-z0-9]+", seg) if w]
+
+
+# What a retirement notice says about the thing it replaced. The address
+# alone matches compounds that are a subject or a name (internet-shutdown,
+# sunrise-sunset), so the page the redirect reached has to say it near the top.
+_MOVED_RE = re.compile(
+    r"\b(?:has|have) moved\b|\b(?:has|have) been (?:sunset|sunsetted|retired|discontinued|"
+    r"shut down|archived)\b|\bwe(?:'re| are| have)? (?:sunsetting|retiring|discontinuing|"
+    r"shutting down|winding down)\b|\bno longer (?:available|maintained|updated|supported|"
+    r"being updated)\b|\bcontinuing (?:that|this|the) work\b", re.I)
+
+
+def notice_says_it_moved(text):
+    """True when the first 3,000 characters of a landed page announce a retirement."""
+    return bool(text and _MOVED_RE.search(text[:3000]))
 
 
 def sunset_landing(url, final):
@@ -305,7 +323,14 @@ def sunset_landing(url, final):
     listed_segs = [seg for seg in (urlparse(url).path or "").split("/") if seg]
     if not listed_segs or any(_SUNSET_ALONE.search(seg) for seg in listed_segs):
         return None   # a front page names no product; a notice moved nowhere
-    product = _compact(_words(listed_segs[-1]))
+    # The product's own segment: the last one that is not a file name such as
+    # index.html or a two-letter language code such as /en/.
+    named = [seg for seg in listed_segs
+             if not re.match(r"^(?:index|default|home)(?:\.[a-z0-9]{1,5})?$", seg, re.I)
+             and not re.match(r"^[a-z]{2}(?:[-_][a-z]{2})?$", seg, re.I)]
+    if not named:
+        return None
+    product = _compact(_words(named[-1]))
     if len(product) < 3:
         return None
     landed = urlparse(final).path or ""
@@ -1501,8 +1526,9 @@ def closure_sentence(source, phrase, capped=""):
             'that page changed%s' % (source, phrase, capped))
 
 
-# Its own wording, since the page itself was never read for it: only the
-# address the listing now redirects to.
+# Its own wording, since the scorer reads this ending from the address the
+# listing now redirects to, backed by a line on that page, and not from a
+# closure statement.
 REDIRECT_CLOSURE_WORDING = "The listed address now redirects to a notice whose address says the project ended"
 
 
@@ -3798,10 +3824,14 @@ def score_project(project, budget_s=None):
             page_closed, page_closed_phrase = page_says_closed(page_html, now, text=rendered)
             if not page_closed:
                 notice = sunset_landing(website_url, _PAGE_FINAL.get(website_url))
+                if notice and not notice_says_it_moved(rendered or readable):
+                    notice = None
                 if notice:
                     page_closed, page_closed_phrase = True, notice
                     page_closed_source = "redirect"
-            if page_closed:
+            if page_closed and page_closed_source == "redirect":
+                _log(f"    page     → redirects to a shutdown notice: {page_closed_phrase!r}")
+            elif page_closed:
                 _log(f"    page     → says it has closed: {page_closed_phrase!r}")
             elif not page_unreadable and not page_signals and not news:
                 # The wording check found nothing and neither did any date. This
@@ -4130,9 +4160,10 @@ def score_project(project, budget_s=None):
     # much is happening there, and Activity status keeps carrying it; the score
     # exists precisely so that case does not have to collapse into a binary.
     if status == "Inactive":
-        # A redirect to a notice is read from the address alone, so it caps the
-        # score and leaves Status for a person. Only the page's own words are
-        # strong enough to write Inactive, which takes a record off the queue.
+        # The scorer reads a redirect to a notice mostly from its address, so it
+        # caps the score and leaves Status for a person. Only the page's own
+        # words are strong enough to write Inactive, which takes a record off
+        # the queue for good.
         says_finished = page_closed and page_closed_source == "page"
         # A relink is the one failure that is explicitly not a verdict: the
         # organisation is still answering and only the link is stale, which is
@@ -4156,7 +4187,11 @@ def score_project(project, budget_s=None):
                            "as inactive")
                 unreachable = False
 
-        if not (says_finished or unreachable):
+        if not (says_finished or unreachable) and page_closed_source == "redirect":
+            why.append("A person sets Status for a redirect to a notice, since the "
+                       "scorer read the ending mostly from an address")
+            status = None
+        elif not (says_finished or unreachable):
             why.append("The score is low, but the site still answers and nothing on it "
                        "says the project has finished, so it is not recorded as "
                        "inactive: a resource that is still up is still usable")
