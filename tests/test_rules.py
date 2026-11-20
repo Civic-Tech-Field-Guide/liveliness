@@ -2696,6 +2696,8 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://beta.widget.org/", "https://foundation.org/news/widget-sunset/"),
             ("https://my.widget.org/", "https://foundation.org/news/widget-sunset/"),
             ("https://en.widget.org/", "https://foundation.org/news/widget-sunset/"),
+            ("https://docs.widget.org/", "https://foundation.org/news/widget-sunset/"),
+            ("https://x.org/tracker", "https://x.org/news/tracker-sunset/"),
             ("https://x.org/widget", "https://x.org/news/widget-sunset/en-us/")):
         assert core.sunset_landing(listed, final), (listed, final)
 
@@ -2801,6 +2803,7 @@ def test_a_notice_without_a_reading_says_so(monkeypatch):
     result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
     assert result["adjudication"] is None
     assert result["score"] is None
+    assert "sets no Status" not in result["breakdown"]
     assert "https://x.org/news/widget-sunset/" in result["breakdown"]
 
 

@@ -287,10 +287,11 @@ _DOWNTIME = re.compile(r"(?:^|[-_/])(?:maintenance|planned|scheduled|outage|down
 _FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
 _INDEX_FILE = re.compile(r"^(?:index|default|home)(?:\.[a-z0-9]{1,5})?$", re.I)
 _DATE_PREFIX = re.compile(r"^" + _BEFORE)
-# Slugs too generic to name a product: a page about, or an id.
 # Subjects that put "shutdown" at the end of a live page's address.
 _SHUTDOWN_SUBJECTS = {"internet", "mobile", "socialmedia", "network", "government",
                       "tracker", "map", "data"}
+_SHUTDOWN_WORD = re.compile(r"[-_]shut[-_]?down" + _AFTER + _EXT + r"$", re.I)
+# Slugs too generic to name a product: a page about, or an id.
 _GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page", "pages",
                      "project", "projects", "tool", "tools", "app", "apps", "index",
                      "service", "services", "program", "programs", "site",
@@ -372,8 +373,9 @@ def sunset_landing(url, final, name=None):
         # in parentheses ("European Digital DemocracY network (EDDY)").
         host = (urlparse(url).hostname or "").lower()
         label = (_registrable(host).split(".") or [""])[0]
-        # A subdomain names the product (widget.bigorg.org), the registered
-        # domain names the organization, so the subdomain wins when there is one.
+        # A subdomain names the product (widget.bigorg.org) and the registered
+        # domain the organization, so the subdomain wins when it is a usable
+        # name. A generic or short one (docs., my., en.) falls back to the domain.
         sub = host[: -len(_registrable(host))].rstrip(".")
         sub = sub[4:] if sub.startswith("www.") else ("" if sub == "www" else sub)
         sub_label = sub.split(".")[-1] if sub else ""
@@ -383,9 +385,8 @@ def sunset_landing(url, final, name=None):
         title = name or ""
         outside = re.sub(r"\([^)]*\)", " ", title)
         inside = " ".join(re.findall(r"\(([^)]*)\)", title))
-        # The subdomain names the product (widget.bigorg.org); the registered
-        # domain counts only without one, since there it names the organization.
-        for p in (_compact(sub_label) if sub_label else _compact(label),
+        sub_name = _compact(sub_label)
+        for p in (sub_name if usable(sub_name) else _compact(label),
                   _compact(title), _compact(outside), _compact(inside)):
             if usable(p):
                 products.add(p)
@@ -399,7 +400,7 @@ def sunset_landing(url, final, name=None):
         # discontinued): the rest is compared with the other one trimmed too.
         def rest_names_product(m):
             rest = m.group("rest")
-            if _compact(rest) in _SHUTDOWN_SUBJECTS:
+            if _compact(rest) in _SHUTDOWN_SUBJECTS and _SHUTDOWN_WORD.search(seg):
                 return False
             trimmed = re.sub(r"^" + _SUNSET_WORDS + r"[-_]|[-_]" + _SUNSET_WORDS + r"$", "",
                              rest, flags=re.I)
@@ -4188,8 +4189,9 @@ def score_project(project, budget_s=None):
                        "their own")
 
     if notice:
-        held = ("" if page_closed or is_finished_work(project)
-                else ". The scorer sets no Status for it")
+        held = (". The scorer sets no Status for it"
+                if not page_closed and not is_finished_work(project)
+                and pending_adjudication is not None else "")
         why.append("The listed address now redirects to %s, which reads as a shutdown "
                    "notice, so the scorer counts nothing dated on that page, and no "
                    "feed or social account, since those are usually the organization's%s" % (
@@ -4349,8 +4351,7 @@ def score_project(project, budget_s=None):
         why = ["Nothing on this listing could be checked: no working website address, "
                "no code repository, no feed and no reachable social accounts."]
     elif undated and notice:
-        why.append(("Nothing dated was found in the project's code" if project.repo else
-                    "This listing has no code repository") + ", so there is no "
+        why.append("Nothing dated was found, so there is no "
                    "evidence either way about whether this project is still running. "
                    "Reported as Unknown rather than scored.")
     elif undated:
