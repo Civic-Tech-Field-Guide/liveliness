@@ -271,10 +271,12 @@ _EXT = r"(?:\.[a-z0-9]{1,5})?"
 _BEFORE = r"(?:\d{4}(?:[-_]\d{2}){0,2}[-_])?"
 _AFTER = r"(?:[-_](?:\d{4}(?:[-_]\d{2}){0,2}|notice|announcement|update|faq))*"
 _SUNSET_AT_END = re.compile(r"^" + _BEFORE + r"(?P<rest>.+?)[-_]" + _SUNSET_WORDS + _AFTER + _EXT + r"$", re.I)
-# At the start of a segment the bare word "sunset" is usually a place
-# (sunset-district, sunset-park), so only its inflected forms count there.
-_SUNSET_START_WORDS = (r"(?:sunsetted|sunsetting|shut[-_]?down|discontinued|"
-                       r"discontinuation|end[-_]of[-_]life|farewell)")
+# At the start of a segment the bare words are usually a subject: a place
+# (sunset-district), a tracker (shutdown-tracker), a party (farewell-party).
+# Only the forms that can only mean an ending count there, farewell-to-widget
+# among them.
+_SUNSET_START_WORDS = (r"(?:sunsetted|sunsetting|discontinued|discontinuation|"
+                       r"end[-_]of[-_]life|farewell[-_]to)")
 _SUNSET_AT_START = re.compile(r"^" + _BEFORE + _SUNSET_START_WORDS + r"[-_](?P<rest>.+?)" + _AFTER + _EXT + r"$", re.I)
 # Words that make a shutdown a planned outage rather than an ending, anywhere
 # in the landed path.
@@ -286,6 +288,9 @@ _FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
 _INDEX_FILE = re.compile(r"^(?:index|default|home)(?:\.[a-z0-9]{1,5})?$", re.I)
 _DATE_PREFIX = re.compile(r"^" + _BEFORE)
 # Slugs too generic to name a product: a page about, or an id.
+# Subjects that put "shutdown" at the end of a live page's address.
+_SHUTDOWN_SUBJECTS = {"internet", "mobile", "socialmedia", "network", "government",
+                      "tracker", "map", "data"}
 _GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page", "pages",
                      "project", "projects", "tool", "tools", "app", "apps", "index",
                      "service", "services", "program", "programs", "site",
@@ -313,8 +318,8 @@ def sunset_landing(url, final, name=None):
     whose address reads as this product's shutdown notice, or None.
 
     The landed segment has to be the listed product's name with an ending word
-    at one end of it. The product's name is the listed path's last two
-    specific segments, skipping a file name such as index.html, a language code such as
+    at one end of it. The product's name is the listed path's last specific
+    segment, or its parent when the last one is generic, skipping a file name such as index.html, a language code such as
     /en/, and a generic page such as /about/ or /app/. A front page, alone or
     in one language, takes it from its registered domain (widget.org) or from
     `name`. A short section such as /ai/ names nothing. This stands in for trusted_move(), which it
@@ -350,8 +355,6 @@ def sunset_landing(url, final, name=None):
         return len(p) >= 3 and not p.isdigit() and p not in _GENERIC_PRODUCTS
 
     products = set()
-    # The last two specific segments, walking back past generic ones: a deep
-    # link such as /widget/overview names the product one level up.
     # The last segment names the product. Its parent counts only when the last
     # segment is generic (/widget/app): /team/alice is Alice, not the team.
     for seg in reversed(named):
@@ -374,14 +377,16 @@ def sunset_landing(url, final, name=None):
         sub = host[: -len(_registrable(host))].rstrip(".")
         sub = sub[4:] if sub.startswith("www.") else ("" if sub == "www" else sub)
         sub_label = sub.split(".")[-1] if sub else ""
-        if sub_label in ("beta", "staging", "app", "dev", "test", "demo"):
+        if sub_label in ("beta", "staging", "app", "dev", "test", "demo", "www2", "my", "go", "m") \
+                or _is_language_root("/" + sub_label):
             sub_label = ""
         title = name or ""
         outside = re.sub(r"\([^)]*\)", " ", title)
         inside = " ".join(re.findall(r"\(([^)]*)\)", title))
         # The subdomain names the product (widget.bigorg.org); the registered
         # domain counts only without one, since there it names the organization.
-        for p in (_compact(sub_label or label), _compact(title), _compact(outside), _compact(inside)):
+        for p in (_compact(sub_label) if sub_label else _compact(label),
+                  _compact(title), _compact(outside), _compact(inside)):
             if usable(p):
                 products.add(p)
     if not products:
@@ -394,6 +399,8 @@ def sunset_landing(url, final, name=None):
         # discontinued): the rest is compared with the other one trimmed too.
         def rest_names_product(m):
             rest = m.group("rest")
+            if _compact(rest) in _SHUTDOWN_SUBJECTS:
+                return False
             trimmed = re.sub(r"^" + _SUNSET_WORDS + r"[-_]|[-_]" + _SUNSET_WORDS + r"$", "",
                              rest, flags=re.I)
             return _compact(rest) in products or _compact(trimmed) in products
@@ -404,7 +411,8 @@ def sunset_landing(url, final, name=None):
         # A downtime word counts only in the notice's own segment, outside the
         # product's name, or below it: /planned-giving/news/widget-sunset/ is
         # a section name, not an outage.
-        around = "/".join([seg.replace(m.group("rest"), "")] + segs[i + 1:])
+        around = "/".join([seg.replace(m.group("rest"), "")]
+                          + [x for x in segs[i + 1:] if not _is_language_root("/" + x)])
         if _DOWNTIME.search(around):
             continue
         return landed
@@ -4035,7 +4043,9 @@ def score_project(project, budget_s=None):
             why.append("The GitHub repository is archived, so however recent its last "
                        "activity is, it counts for at most 15")
     else:
-        why.append("No dated activity found in code (0)" if notice else
+        why.append(("No dated activity found in code (0)" if project.repo else
+                    "No code repository to date it, and the notice page, feeds and "
+                    "social accounts are not counted (0)") if notice else
                    "No dated activity found in code, feeds, social posts or on the "
                    "project's own page (0)")
 
@@ -4224,7 +4234,8 @@ def score_project(project, budget_s=None):
     # Status from the rules. Supplied feeds and social accounts are often the
     # organization's, still busy after the product ended, and only a reading of
     # the notice can say what it means.
-    if notice and not page_closed and status in ("Active", "Inactive"):
+    if notice and not page_closed and pending_adjudication is not None \
+            and status in ("Active", "Inactive"):
         status = None
 
     # A finished piece of work is N/A, and it outranks anything the signals say.
@@ -4338,7 +4349,8 @@ def score_project(project, budget_s=None):
         why = ["Nothing on this listing could be checked: no working website address, "
                "no code repository, no feed and no reachable social accounts."]
     elif undated and notice:
-        why.append("Nothing dated was found in the project's code, so there is no "
+        why.append(("Nothing dated was found in the project's code" if project.repo else
+                    "This listing has no code repository") + ", so there is no "
                    "evidence either way about whether this project is still running. "
                    "Reported as Unknown rather than scored.")
     elif undated:
