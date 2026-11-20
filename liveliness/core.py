@@ -293,16 +293,16 @@ def _compact(seg):
     return "".join(w for w in re.split(r"[^a-z0-9]+", seg) if w and w not in _FILLER)
 
 
-def sunset_landing(url, final):
+def sunset_landing(url, final, name=None):
     """
     The landed path when the listed page now redirects to a different page
     whose address reads as this product's shutdown notice, or None.
 
     The landed segment has to be the listed product's name with an ending word
-    at one end of it. The product's name is the listed path's last segment,
-    skipping a file name such as index.html and a language code such as /en/.
-    A name shorter than three letters, an id or a generic page such as /about/
-    names no product. This stands in for trusted_move(), which it
+    at one end of it. The product's name is the listed path's last specific
+    segment, skipping a file name such as index.html, a language code such as
+    /en/, and a generic page such as /about/ or /app/. A listed front page
+    takes its name from its registered domain (widget.org) or from `name`. This stands in for trusted_move(), which it
     deliberately does not ask: an organization that retires a product often
     announces it from a renamed domain (foundation.mozilla.org to
     www.mozillafoundation.org).
@@ -310,32 +310,53 @@ def sunset_landing(url, final):
     A match decides nothing on its own. score_project() stops counting the
     notice's dates as the product's and queues the page for a reading. The
     scorer sees only the path of the redirect a plain fetch followed, so it
-    misses a notice that a browser render, a meta refresh or a script reaches,
+    misses a notice that a browser render, a meta refresh or a script reaches
+    (a site behind a bot wall among them), one served with an error status,
     one named only in a query string or fragment, and one that splits the
     product and the ending word across two segments (/widget/sunset/).
     """
     if not final or final == url or is_archive_host(final):
         return None
-    listed_segs = [seg for seg in (urlparse(url).path or "").split("/") if seg]
-    if any(_SUNSET_ALONE.search(seg) for seg in listed_segs):
+    landed = urlparse(final).path or ""
+    listed_path = urlparse(url).path or ""
+    if landed.rstrip("/").lower() == listed_path.rstrip("/").lower() and \
+            _registrable(urlparse(final).hostname) == _registrable(urlparse(url).hostname):
         return None   # the listing itself is the notice: nothing moved
+    listed_segs = [seg for seg in listed_path.split("/") if seg]
     named = [seg for seg in listed_segs
              if not _INDEX_FILE.match(seg) and not _LOCALE.match(seg)]
+
+    def usable(p):
+        return len(p) >= 3 and not p.isdigit() and p not in _GENERIC_PRODUCTS
+
+    products = set()
+    # The last specific segment, walking back past generic ones (/widget/app).
+    for seg in reversed(named):
+        p = _compact(_DATE_PREFIX.sub("", unquote(seg)))
+        if usable(p):
+            products.add(p)
+            break
     if not named:
-        return None   # a front page names no product
-    product = _compact(_DATE_PREFIX.sub("", unquote(named[-1])))
-    if len(product) < 3 or product.isdigit() or product in _GENERIC_PRODUCTS:
+        # A listed front page: the product is the site's own name, read from
+        # its registered domain (widget.org) or the listing's name.
+        host = urlparse(url).hostname or ""
+        label = (_registrable(host).split(".") or [""])[0]
+        for p in (_compact(label), _compact(name or "")):
+            if usable(p):
+                products.add(p)
+    if not products:
         return None
-    landed = urlparse(final).path or ""
     segs = landed.split("/")
     for i, seg in enumerate(segs):
         if not seg:
             continue
         m = _SUNSET_AT_END.match(seg) or _SUNSET_AT_START.match(seg)
-        if not m or _compact(m.group("rest")) != product:
+        if not m or _compact(m.group("rest")) not in products:
             continue
-        # A downtime word counts only outside the product's own name.
-        around = "/".join(segs[:i] + [seg.replace(m.group("rest"), "")] + segs[i + 1:])
+        # A downtime word counts only in the notice's own segment, outside the
+        # product's name, or below it: /planned-giving/news/widget-sunset/ is
+        # a section name, not an outage.
+        around = "/".join([seg.replace(m.group("rest"), "")] + segs[i + 1:])
         if _DOWNTIME.search(around):
             return None
         return landed
@@ -3650,7 +3671,7 @@ def score_project(project, budget_s=None):
     notice = None
     if website_url and website_alive is True and url_class != "skip":
         get_page_cached(website_url)
-        notice = sunset_landing(website_url, _PAGE_FINAL.get(website_url))
+        notice = sunset_landing(website_url, _PAGE_FINAL.get(website_url), name)
         if notice:
             _log(f"    website  → redirects to what looks like a shutdown notice: {notice}")
 
@@ -3820,11 +3841,15 @@ def score_project(project, budget_s=None):
             page_closed, page_closed_phrase = page_says_closed(page_html, now, text=rendered)
             if page_closed:
                 _log(f"    page     → says it has closed: {page_closed_phrase!r}")
-            elif notice and not page_unreadable:
+            if notice and not page_unreadable:
+                # Queued whatever the closure check found: a person sees every
+                # notice, and the closure keeps its own Inactive meanwhile.
                 words = rendered if rendered is not None else readable
                 pending_adjudication = adjudication_candidate(name, website_url, words)
                 if pending_adjudication:
                     _log(f"    page     → shutdown notice queued for reading")
+            elif page_closed:
+                pass
             elif not page_unreadable and not page_signals and not news:
                 # The wording check found nothing and neither did any date. This
                 # is the narrow band the rules cannot settle, so it is the only
@@ -4139,7 +4164,7 @@ def score_project(project, budget_s=None):
     # Status from the rules. Supplied feeds and social accounts are often the
     # organization's, still busy after the product ended, and only a reading of
     # the notice can say what it means.
-    if notice and status in ("Active", "Inactive"):
+    if notice and not page_closed and status in ("Active", "Inactive"):
         status = None
 
     # A finished piece of work is N/A, and it outranks anything the signals say.
@@ -4231,6 +4256,13 @@ def score_project(project, budget_s=None):
                                       else score_to_status(closed_score),
         })
 
+    # The same goes for the score and activity status: supplied feeds and
+    # social accounts are often the organization's, so a notice publishes
+    # Unknown until a person rules. The queue row above keeps the raw score.
+    if notice and not page_closed:
+        unknown = True
+        activity_status = "Unknown"
+
     if unknown:
         score = None            # clears the field rather than publishing a number
 
@@ -4257,6 +4289,8 @@ def score_project(project, budget_s=None):
                    "no evidence either way about whether this project is still running. "
                    "A reachable website only shows the address still resolves. Reported "
                    "as Unknown rather than scored.")
+    elif score is None:
+        why.append("Reported as Unknown until a person reads the notice.")
     else:
         why.append(f"Total: {score:g} out of 100 - {activity_status}")
     breakdown = "\n".join(why)

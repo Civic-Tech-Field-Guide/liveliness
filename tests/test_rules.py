@@ -2682,7 +2682,11 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://x.org/outage-map", "https://x.org/news/outage-map-sunset/"),
             ("https://x.org/2024-report", "https://x.org/2024-report-sunset/"),
             ("https://x.org/Widget%20App", "https://x.org/widget-app-sunset/"),
-            ("https://x.org/widget", "https://x.org/widget-sunset-notice-2024/")):
+            ("https://x.org/widget", "https://x.org/widget-sunset-notice-2024/"),
+            ("https://widget.org/", "https://www.foundation.org/news/widget-sunset/"),
+            ("https://x.org/widget/app", "https://x.org/news/widget-sunset/"),
+            ("https://x.org/widget", "https://x.org/planned-giving/news/widget-sunset/"),
+            ("https://x.org/sunset-park-tenants", "https://x.org/news/sunset-park-tenants-shutdown/")):
         assert core.sunset_landing(listed, final), (listed, final)
 
 
@@ -2775,3 +2779,27 @@ def test_an_ordinary_redirect_is_still_dated(monkeypatch):
     monkeypatch.setattr(core, "wayback_change_date", lambda u, now=None, **k: None)
     core.score_project(Project(name="Widget", website="https://x.org/tools/widget/"))
     assert calls
+
+
+
+def test_a_listed_front_page_matches_on_the_listing_name():
+    from liveliness import core
+    assert core.sunset_landing("https://getwidget.io/", "https://org.example/news/widget-sunset/", "Widget")
+    assert not core.sunset_landing("https://getwidget.io/", "https://org.example/news/widget-sunset/")
+
+
+def test_a_notice_that_says_it_ended_keeps_inactive_and_is_queued(monkeypatch):
+    from liveliness import core
+    _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    monkeypatch.setattr(core, "page_says_closed", lambda *a, **k: (True, "this project has ended"))
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
+    assert result["adjudication"] and result["adjudication"]["notice_url"]
+
+
+def test_a_notice_publishes_no_score_until_a_person_rules(monkeypatch):
+    from liveliness import core
+    _notice_site(monkeypatch, core, "https://x.org/news/widget-sunset/")
+    monkeypatch.setattr(core, "latest_blog_date", lambda *a: _now())
+    result = core.score_project(Project(name="Widget", website="https://x.org/widget/"))
+    assert result["score"] is None and result["activity_status"] == "Unknown"
+    assert result["adjudication"]["raw_score"] > 0
