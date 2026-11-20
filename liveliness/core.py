@@ -305,6 +305,18 @@ def _compact(seg):
     return "".join(w for w in re.split(r"[^a-z0-9]+", seg) if w and w not in _FILLER)
 
 
+_SCRIPTS = {"hans", "hant", "latn", "cyrl", "arab", "deva", "jpan", "kore"}
+
+
+def _is_locale_segment(seg):
+    """A bare language code, or one with a two-letter region or a script: en, pt-br, zh-hant."""
+    m = re.fullmatch(r"([a-z]{2})(?:[-_]([a-z]{2}|[a-z]{4}))?", (seg or "").lower())
+    if not m or m.group(1) not in _LANGUAGE_CODES:
+        return False
+    tail = m.group(2)
+    return tail is None or len(tail) == 2 or tail in _SCRIPTS
+
+
 def _notice_address(url):
     """A notice's address without its query string or fragment, for publishing."""
     if not url:
@@ -344,13 +356,11 @@ def sunset_landing(url, final, name=None):
             _registrable(urlparse(final).hostname) == _registrable(urlparse(url).hostname):
         return None   # the listing itself is the notice: nothing moved
     listed_segs = [seg for seg in listed_path.split("/") if seg]
-    # A language code counts as the first segment (/en-gb/widget/) or as a
-    # bare two letters anywhere (/widget/en/): my-data and it-help further in
-    # are product names, not locales.
-    named = [seg for i, seg in enumerate(listed_segs)
+    # A locale is a bare language code or one with a real region or script
+    # (/en/, /pt-br/, /zh-hant/): my-data and it-help are product names.
+    named = [seg for seg in listed_segs
              if not _INDEX_FILE.match(seg)
-             and not (len(listed_segs) > 1 and _is_language_root("/" + seg)
-                      and (i == 0 or len(seg) == 2))]
+             and not (len(listed_segs) > 1 and _is_locale_segment(seg))]
 
     def usable(p):
         return len(p) >= 3 and not p.isdigit() and p not in _GENERIC_PRODUCTS
@@ -378,16 +388,16 @@ def sunset_landing(url, final, name=None):
         # count; a generic or short subdomain (docs., my., en.) names nothing.
         sub = host[: -len(_registrable(host))].rstrip(".")
         sub = sub[4:] if sub.startswith("www.") else ("" if sub == "www" else sub)
-        sub_label = sub.split(".")[-1] if sub else ""
-        if sub_label in ("beta", "staging", "app", "dev", "test", "demo", "www2", "my", "go", "m") \
-                or _is_language_root("/" + sub_label):
-            sub_label = ""
+        # Every label of the subdomain is tried, past generic and locale ones
+        # (widget.en.bigorg.org).
+        skip = ("beta", "staging", "app", "dev", "test", "demo", "www2", "my", "go", "m")
+        sub_labels = [l for l in (sub.split(".") if sub else [])
+                      if l not in skip and not _is_locale_segment(l)]
         title = name or ""
         outside = re.sub(r"\([^)]*\)", " ", title)
         inside = " ".join(re.findall(r"\(([^)]*)\)", title))
-        sub_name = _compact(sub_label)
-        for p in (sub_name, _compact(label),
-                  _compact(title), _compact(outside), _compact(inside)):
+        for p in ([_compact(l) for l in sub_labels] + [_compact(label),
+                  _compact(title), _compact(outside), _compact(inside)]):
             if usable(p):
                 products.add(p)
     if not products:
@@ -4232,11 +4242,10 @@ def score_project(project, budget_s=None):
     if status == "Active" and winner is not None and not winner.own:
         status = None
     # A listing whose address now redirects to its shutdown notice gets no
-    # Status from the rules. Supplied feeds and social accounts are often the
-    # organization's, still busy after the product ended, and only a reading of
-    # the notice can say what it means.
-    if notice and not page_closed and pending_adjudication is not None \
-            and status in ("Active", "Inactive"):
+    # Status from the rules, queued or not: a fresh commit says the code moved,
+    # not that the product runs, and only a person reading the notice can say
+    # what it means.
+    if notice and not page_closed and status in ("Active", "Inactive"):
         status = None
 
     # A finished piece of work is N/A, and it outranks anything the signals say.
