@@ -279,7 +279,8 @@ _SUNSET_AT_START = re.compile(r"^" + _BEFORE + _SUNSET_START_WORDS + r"[-_](?P<r
 # Words that make a shutdown a planned outage rather than an ending, anywhere
 # in the landed path.
 _DOWNTIME = re.compile(r"(?:^|[-_/])(?:maintenance|planned|scheduled|outage|downtime|"
-                       r"weekend|tonight|temporary)(?=[-_/.]|$)", re.I)
+                       r"weekend|tonight|temporary|lapse|appropriations|furlough|"
+                       r"government|federal|usa|us)(?=[-_/.]|$)", re.I)
 # Function words dropped before the product is compared: farewell-to-the-widget.
 _FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
 _INDEX_FILE = re.compile(r"^(?:index|default|home)(?:\.[a-z0-9]{1,5})?$", re.I)
@@ -293,6 +294,14 @@ _GENERIC_PRODUCTS = {"about", "home", "news", "blog", "data", "internet", "page"
 def _compact(seg):
     seg = re.sub(r"\.[a-z0-9]{1,5}$", "", unquote(seg).lower())
     return "".join(w for w in re.split(r"[^a-z0-9]+", seg) if w and w not in _FILLER)
+
+
+def _notice_address(url):
+    """A notice's address without its query string or fragment, for publishing."""
+    if not url:
+        return url
+    p = urlparse(url)
+    return p._replace(query="", fragment="").geturl()
 
 
 def sunset_landing(url, final, name=None):
@@ -326,11 +335,13 @@ def sunset_landing(url, final, name=None):
             _registrable(urlparse(final).hostname) == _registrable(urlparse(url).hostname):
         return None   # the listing itself is the notice: nothing moved
     listed_segs = [seg for seg in listed_path.split("/") if seg]
-    # A language code counts only as the first segment (/en/widget/): my-data
-    # and it-help are product names, not locales.
+    # A language code counts as the first segment (/en-gb/widget/) or as a
+    # bare two letters anywhere (/widget/en/): my-data and it-help further in
+    # are product names, not locales.
     named = [seg for i, seg in enumerate(listed_segs)
              if not _INDEX_FILE.match(seg)
-             and not (i == 0 and len(listed_segs) > 1 and _is_language_root("/" + seg))]
+             and not (len(listed_segs) > 1 and _is_language_root("/" + seg)
+                      and (i == 0 or len(seg) == 2))]
 
     def usable(p):
         return len(p) >= 3 and not p.isdigit() and p not in _GENERIC_PRODUCTS
@@ -338,12 +349,15 @@ def sunset_landing(url, final, name=None):
     products = set()
     # The last two specific segments, walking back past generic ones: a deep
     # link such as /widget/overview names the product one level up.
+    # The last segment names the product. Its parent counts only when the last
+    # segment is generic (/widget/app): /team/alice is Alice, not the team.
     for seg in reversed(named):
         p = _compact(_DATE_PREFIX.sub("", unquote(seg)))
         if usable(p):
             products.add(p)
-            if len(products) == 2:
-                break
+            break
+        if p not in _GENERIC_PRODUCTS:
+            break
     front_page = all(_is_language_root("/" + seg) for seg in named)
     if not products and front_page:
         # A listed front page, alone or in one language (/en/):
@@ -356,12 +370,15 @@ def sunset_landing(url, final, name=None):
         # domain names the organization, so the subdomain wins when there is one.
         sub = host[: -len(_registrable(host))].rstrip(".")
         sub = sub[4:] if sub.startswith("www.") else ("" if sub == "www" else sub)
-        if sub:
-            label = sub.split(".")[-1]
+        sub_label = sub.split(".")[-1] if sub else ""
+        if sub_label in ("beta", "staging", "app", "dev", "test", "demo"):
+            sub_label = ""
         title = name or ""
         outside = re.sub(r"\([^)]*\)", " ", title)
         inside = " ".join(re.findall(r"\(([^)]*)\)", title))
-        for p in (_compact(label), _compact(title), _compact(outside), _compact(inside)):
+        # The subdomain names the product (widget.bigorg.org); the registered
+        # domain counts only without one, since there it names the organization.
+        for p in (_compact(sub_label or label), _compact(title), _compact(outside), _compact(inside)):
             if usable(p):
                 products.add(p)
     if not products:
@@ -370,8 +387,9 @@ def sunset_landing(url, final, name=None):
     for i, seg in enumerate(segs):
         if not seg:
             continue
-        m = _SUNSET_AT_END.match(seg) or _SUNSET_AT_START.match(seg)
-        if not m or _compact(m.group("rest")) not in products:
+        m = next((m for m in (_SUNSET_AT_END.match(seg), _SUNSET_AT_START.match(seg))
+                  if m and _compact(m.group("rest")) in products), None)
+        if not m:
             continue
         # A downtime word counts only in the notice's own segment, outside the
         # product's name, or below it: /planned-giving/news/widget-sunset/ is
@@ -3697,7 +3715,7 @@ def score_project(project, budget_s=None):
         notice = sunset_landing(website_url, _PAGE_FINAL.get(website_url), name)
         if notice:
             _log(f"    website  → redirects to what looks like a shutdown notice: "
-                 f"{_PAGE_FINAL.get(website_url)}")
+                 f"{_notice_address(_PAGE_FINAL.get(website_url))}")
 
     # ── GitHub ───────────────────────────────────────────────────────────────
     gh = check_github(project.repo)
@@ -4007,7 +4025,8 @@ def score_project(project, budget_s=None):
             why.append("The GitHub repository is archived, so however recent its last "
                        "activity is, it counts for at most 15")
     else:
-        why.append("No dated activity found in code, feeds, social posts or on the "
+        why.append("No dated activity found in code (0)" if notice else
+                   "No dated activity found in code, feeds, social posts or on the "
                    "project's own page (0)")
 
     # Issue tracker responsiveness. A tiebreaker on the dated signals above,
@@ -4026,6 +4045,8 @@ def score_project(project, budget_s=None):
         score = min(score, 10)      # almost certainly dead if pointing to web archive
         why.append("The listed address is an archive snapshot and the original no "
                    "longer answers (score capped at 10)")
+    elif website_alive is True and notice:
+        pass   # the page that answered is the organization's notice, not the product
     elif website_alive is True:
         bonus  = website_alive_bonus(bonus_date, now)
         before = score
@@ -4148,11 +4169,11 @@ def score_project(project, budget_s=None):
 
     if notice:
         held = ("" if page_closed or is_finished_work(project)
-                else " and sets no Status")
+                else ". The scorer sets no Status for it")
         why.append("The listed address now redirects to %s, which reads as a shutdown "
                    "notice, so the scorer counts nothing dated on that page, and no "
                    "feed or social account, since those are usually the organization's%s" % (
-                       _PAGE_FINAL.get(website_url) or notice, held))
+                       _notice_address(_PAGE_FINAL.get(website_url)) or notice, held))
 
     # The page saying it has finished outranks everything above it, including a
     # recent launch: something added to the directory in March and closed in July
@@ -4274,7 +4295,7 @@ def score_project(project, budget_s=None):
             # The full address the listing now redirects to, when it reads as
             # the product's shutdown notice. The Field Guide's review step
             # shows it, and sends the page to a person whatever the reading.
-            "notice_url":             _PAGE_FINAL.get(website_url) if notice else None,
+            "notice_url":             _notice_address(_PAGE_FINAL.get(website_url)) if notice else None,
             "closed_score":           None if no_signals else closed_score,
             "closed_activity_status": "Unknown" if no_signals
                                       else score_to_activity_status(closed_score),
@@ -4306,6 +4327,10 @@ def score_project(project, budget_s=None):
     elif no_signals:
         why = ["Nothing on this listing could be checked: no working website address, "
                "no code repository, no feed and no reachable social accounts."]
+    elif undated and notice:
+        why.append("Nothing dated was found in the project's code, so there is no "
+                   "evidence either way about whether this project is still running. "
+                   "Reported as Unknown rather than scored.")
     elif undated:
         why.append("Nothing dated was found in code, feeds or social posts, so there is "
                    "no evidence either way about whether this project is still running. "

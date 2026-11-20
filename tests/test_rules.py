@@ -2691,7 +2691,9 @@ def test_a_page_redirected_to_its_own_shutdown_notice_is_recognized():
             ("https://x.org/widget", "https://x.org/blog/widget-sunset-2024-08-11/"),
             ("https://widget.org/en/", "https://foundation.org/news/widget-sunset/"),
             ("https://widget.bigorg.org/", "https://bigorg.org/news/widget-sunset/"),
-            ("https://x.org/widget", "https://x.org/news/widget%2Dsunset/")):
+            ("https://x.org/widget", "https://x.org/news/widget%2Dsunset/"),
+            ("https://x.org/widget", "https://x.org/news/farewell-widget-discontinued/"),
+            ("https://beta.widget.org/", "https://foundation.org/news/widget-sunset/")):
         assert core.sunset_landing(listed, final), (listed, final)
 
 
@@ -2720,6 +2722,9 @@ def test_a_shutdown_word_that_is_a_subject_or_another_thing_is_not_a_notice():
             ("https://x.org/ai", "https://x.org/ai-sunset/"),
             ("https://x.org/district", "https://x.org/sunset-district/"),
             ("https://x.org/keepiton/", "https://x.org/keepiton-shutdowns/"),
+            ("https://widget.gov/", "https://widget.gov/widget-shutdown/lapse-in-appropriations"),
+            ("https://x.org/team/alice", "https://x.org/blog/farewell-alice-team/"),
+            ("https://x.org/civic/widget", "https://x.org/news/civic-sunset/"),
             ("https://bigorg.org/ai/", "https://bigorg.org/news/bigorg-farewell/")):
         assert not core.sunset_landing(listed, final), (listed, final)
 
