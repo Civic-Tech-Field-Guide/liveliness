@@ -281,8 +281,10 @@ _SUNSET_AT_START = re.compile(r"^" + _BEFORE + _SUNSET_START_WORDS + r"[-_](?P<r
 # Words that make a shutdown a planned outage rather than an ending, anywhere
 # in the landed path.
 _DOWNTIME = re.compile(r"(?:^|[-_/])(?:maintenance|planned|scheduled|outage|downtime|"
-                       r"weekend|tonight|temporary|lapse|appropriations|furlough|"
-                       r"government|federal)(?=[-_/.]|$)", re.I)
+                       r"weekend|tonight|temporary|lapse|appropriations|furlough)(?=[-_/.]|$)", re.I)
+# A government shutdown names itself beside the word, in the same segment
+# (government-shutdown, federal-shutdown); /government/news/ is a section.
+_GOV_SHUTDOWN = re.compile(r"(?:government|federal)[-_]shut[-_]?down", re.I)
 _FUNDING_LAPSE = re.compile(r"(?:^|[-_/])(?:lapse|appropriations|furlough)(?=[-_/.]|$)", re.I)
 # Function words dropped before the product is compared: farewell-to-the-widget.
 _FILLER = {"to", "the", "our", "of", "for", "and", "a", "an"}
@@ -375,11 +377,13 @@ def sunset_landing(url, final, name=None):
     # The last segment names the product. Its parent counts only when the last
     # segment is generic (/widget/app): /team/alice is Alice, not the team.
     product_seg = ""
+    path_product = ""
     for seg in reversed(named):
         p = _compact(_DATE_PREFIX.sub("", unquote(seg)))
         if usable(p):
             products.add(p)
             product_seg = seg
+            path_product = p
             break
         if p not in _GENERIC_PRODUCTS:
             break
@@ -426,7 +430,12 @@ def sunset_landing(url, final, name=None):
             landed_years = re.findall(r"(?<!\d)(\d{4})(?!\d)", seg)
             if listed_year and landed_years and listed_year.group(1) not in landed_years:
                 return False
-            if _compact(rest) in _SHUTDOWN_SUBJECTS and _SHUTDOWN_WORD.search(seg):
+            # A subject word before "shutdown" is the page's topic, unless it
+            # is the listed product's own name and the page sits under a
+            # section such as /news/ (/map sent to /news/map-shutdown/).
+            under_section = any(segs[:i])
+            if _compact(rest) in _SHUTDOWN_SUBJECTS and _SHUTDOWN_WORD.search(seg) \
+                    and not (_compact(rest) == path_product and under_section):
                 return False
             trimmed = re.sub(r"^(?:" + _SUNSET_WORDS + r"|farewell(?:[-_]to)?)[-_]|[-_]"
                              + _SUNSET_WORDS + r"$", "",
@@ -444,11 +453,11 @@ def sunset_landing(url, final, name=None):
                           + [x for x in segs[i + 1:] if not _is_language_root("/" + x)])
         # A funding lapse names itself anywhere in the path
         # (/lapse-in-appropriations/widget-shutdown/).
-        if _DOWNTIME.search(around) or _FUNDING_LAPSE.search(landed):
+        if _DOWNTIME.search(around) or _FUNDING_LAPSE.search(landed) or _GOV_SHUTDOWN.search(seg):
             continue
         # A match under a people section is a person leaving, not a product.
         if any(
-                _compact(x) in ("team", "people", "staff", "about") for x in listed_segs[:-1]):
+                _compact(x) in ("team", "people", "staff") for x in listed_segs[:-1]):
             continue
         return landed
     return None
@@ -4227,9 +4236,7 @@ def score_project(project, budget_s=None):
                    "notice, so the scorer counts nothing dated on that page%s" % (
                        _notice_address(_PAGE_FINAL.get(website_url)) or notice,
                        ", and no feed or social account, since those are usually the "
-                       "organization's" if (project.feeds or any(
-                           (l.get("type") or "").lower() not in ("website", "")
-                           for l in project.links)) else ""))
+                       "organization's" if (project.feeds or all_social_urls) else ""))
 
     # The page saying it has finished outranks everything above it, including a
     # recent launch: something added to the directory in March and closed in July
