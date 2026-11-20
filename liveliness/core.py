@@ -474,6 +474,9 @@ _INTERNATIONAL = frozenset("ar de en es fr it nl pt ru sr zh".split())
 # Microsoft names for simplified and traditional Chinese.
 _LOCALE_ALIASES = {"uk": "gb", "eu": "150", "la": "419", "ww": "001", "int": "001",
                    "chs": "hans", "cht": "hant"}
+# Business regions sites put after a language for a group of markets (en-emea,
+# en-apac, es-latam). No standard has codes for them, so they are named here.
+_MARKET_REGIONS = {"emea", "apac", "ap", "latam", "row", "mena", "dach", "nordics"}
 
 
 def _is_locale_segment(seg):
@@ -489,7 +492,8 @@ def _is_locale_segment(seg):
         return parts[0] in _LANGUAGE_CODES
     if "-".join(parts) in _CLDR_LOCALES:
         return True          # lo-la is Lao in Laos before la is Latin America
-    if len(parts) == 2 and parts[0] in _INTERNATIONAL and parts[1] in _ISO_REGIONS:
+    if len(parts) == 2 and parts[0] in _INTERNATIONAL and (
+            parts[1] in _ISO_REGIONS or parts[1] in _MARKET_REGIONS):
         return True
     parts = [parts[0]] + [_LOCALE_ALIASES.get(x, x) for x in parts[1:]]
     return "-".join(parts) in _CLDR_LOCALES
@@ -525,7 +529,7 @@ def _notice_address(url):
             return re.fullmatch(r"node/\d+", unquote(value)) is not None   # Drupal
         if key in ("lang", "hl", "locale"):
             return _is_locale_segment(unquote(value))
-        return value.isdigit()
+        return key not in _NUMERIC_KEYS or value.isdigit()
     # Both separators RFC 3986 sites use between pairs, so a ;sid= rides along
     # with nothing.
     separator = ";" if ";" in p.query and "&" not in p.query else "&"
@@ -582,11 +586,14 @@ def sunset_landing(url, final, name=None):
     product_seg = ""
     path_product = ""
     version = ""
+    skipping_to_product = False
     for idx in range(len(named) - 1, -1, -1):
         seg = named[idx]
         if _compact(seg, drop_filler=False) in _SECTIONS:
-            if any(usable(_compact(x)) and _compact(x) not in _SECTIONS
+            if any((usable(_compact(x)) or usable(_compact(x, drop_filler=False)))
+                   and _compact(x, drop_filler=False) not in _SECTIONS
                    for x in named[:idx]):
+                skipping_to_product = True
                 continue   # /widget/resources/ names the widget above it
             break          # a listed section page (/resources/) names no product
         if re.fullmatch(r"v\d+(?:\.\d+)*", seg, re.I):
@@ -603,7 +610,7 @@ def sunset_landing(url, final, name=None):
             product_seg = seg
             path_product = p
             break
-        if p not in _GENERIC_PRODUCTS:
+        if p not in _GENERIC_PRODUCTS and not skipping_to_product:
             break
     # A front page, alone, in one language, or its about page (/en/about/).
     front_page = all(_is_locale_segment(seg)
@@ -664,7 +671,7 @@ def sunset_landing(url, final, name=None):
             # later than the item's year but never earlier.
             for x in segs[max(0, i - 3):i]:
                 if re.fullmatch(r"\d{4}", x) and _is_year(x) and listed_year \
-                        and int(x) < int(listed_year.group(1)):
+                        and int(x) <= int(listed_year.group(1)):
                     landed_years.append(x)
             if listed_year and landed_years and listed_year.group(1) not in landed_years:
                 return False
@@ -672,7 +679,9 @@ def sunset_landing(url, final, name=None):
             # name is something that comes out every year (2024-report, 2024-impact-report).
             rest_words = [w for w in re.split(r"[^a-z0-9]+",
                                               _WEB_EXT.sub("", _strip_date(product_seg).lower())) if w]
-            if listed_year and not landed_years and rest_words and rest_words[-1] in _RECURRING:
+            last = rest_words[-1] if rest_words else ""
+            if listed_year and not landed_years and (
+                    last in _RECURRING or (last.endswith("s") and last[:-1] in _RECURRING)):
                 return False
             # A subject word before "shutdown" is the page's topic, unless it
             # is the listed product's own name and the page sits under a
